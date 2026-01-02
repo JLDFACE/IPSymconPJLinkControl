@@ -2,7 +2,7 @@
   "id": "{03FE110D-ECF3-4EA3-9AB9-44A30E93A2BA}",
   "name": "PJLinkProjector",
   "type": 3,
-  "vendor": "Generic",
+  "vendor": "FACE GmbH",
   "aliases": ["Projektor (PJLink) Sony/Epson"],
   "parentRequirements": [],
   "childRequirements": [],
