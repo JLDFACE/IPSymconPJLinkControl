@@ -1,7 +1,8 @@
 <?php
 declare(strict_types=1);
 
-class PJLinkProjector extends IPSModuleStrict
+class PJLinkProjector extends IPSModule
+
 {
     public function Create(): void
     {
@@ -355,16 +356,4 @@ class PJLinkProjector extends IPSModuleStrict
     }
 }
 
-// Timer/Form Hook
-function PJP_Poll(int $InstanceID): void
-{
-    $inst = IPS_GetInstance($InstanceID);
-    // Modulmethoden werden direkt über IPS_RequestAction nicht aufgerufen; daher via Module-Funktion:
-    // IP-Symcon ruft hier die globale Funktion, wir leiten an die Instanzmethode weiter.
-    // @phpstan-ignore-next-line
-    IPS_RunScriptText(''); // no-op placeholder
-    // Direktaufruf:
-    $obj = IPS_GetObject($InstanceID);
-    // Sauberer Weg: IPS_RequestAction auf Dummy ist nicht sinnvoll; wir nutzen CallModuleMethod:
-    IPS_CallModuleMethod($InstanceID, 'Poll', []);
-}
+
