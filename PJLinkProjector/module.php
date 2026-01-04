@@ -3,30 +3,10 @@
 /**
  * PJLink Projector (Sony/Epson) - SymBox-kompatibel (PHP 7.x Stil)
  *
- * Features:
- * - Konfiguration: Vendor (SONY/EPSON), Host, Port, Password
- * - Inputs: nur HDMI1/HDMI2/HDBaseT (logisch 1..3), Codes pro Vendor mit Override
- * - Variablen:
- *   - Power (Boolean, bedienbar, kombiniert Anzeige/Bedienung)
- *   - PowerState (Integer 0..3)
- *   - Input (Integer 1..3)
- *   - Busy (Boolean)
- *   - Online (Boolean)
- *   - LastError (String)
- *   - LastOKTimestamp (Integer Unix Timestamp)
- *   - ErrorCounter (Integer)
- * - intern:
- *   - __CmdPower, __CmdInput(DeviceCode), __PowerOnTS, __LastPwr, __LastChangeTS
- * - Logik:
- *   - InputDelay nur nach echtem Power-On (0 -> !=0)
- *   - Soll-Quelle löschen sobald erreicht
- *   - ERR3 bei INPT? tolerant
- *   - Cool-down: Power-Schalten wird ignoriert
- * - Polling:
- *   - PollSlow Default 15s
- *   - FastAfterChange: nach Statusänderung für X Sekunden PollFast
- * - Semaphore Fix:
- *   - Kein Fatal mehr bei Semaphore timeout (Lock wird non-fatal behandelt)
+ * Fix UX:
+ * - Input flippt nicht mehr hin und her:
+ *   Wenn ein Input-Wechsel pending ist (__CmdInput != 0), überschreibt Poll() die UI-Variable "Input"
+ *   nicht mit dem alten Ist-Wert, bis der Projektor die Soll-Quelle erreicht hat.
  */
 
 class PJLinkProjector extends IPSModule
@@ -98,6 +78,10 @@ class PJLinkProjector extends IPSModule
         $this->RegisterVariableInteger('__CmdInput', '__CMD Input (DeviceCode)', '');
         IPS_SetHidden($this->GetIDForIdent('__CmdInput'), true);
 
+        // Neu: Soll-Input als logischer Wert (1..3) für stabile UI während pending Umschaltung
+        $this->RegisterVariableInteger('__CmdInputLogical', '__CMD Input (Logical)', '');
+        IPS_SetHidden($this->GetIDForIdent('__CmdInputLogical'), true);
+
         $this->RegisterVariableInteger('__PowerOnTS', '__PowerOn TS', '');
         IPS_SetHidden($this->GetIDForIdent('__PowerOnTS'), true);
 
@@ -133,20 +117,17 @@ class PJLinkProjector extends IPSModule
         // Cool-down Sperre
         $pwrState = (int)$this->GetValue('PowerState');
         if ($pwrState === 2) {
-            // UI auf aktuellen Sollwert zurück (keine Änderung zulassen)
             $this->SetValue('Power', (bool)$this->GetValue('__CmdPower'));
             $this->LogMessage('Power-Schalten während Cool-down ignoriert.', KL_WARNING);
             return;
         }
 
         $this->SetValue('__CmdPower', (bool)$wantOn);
-        $this->SetValue('Power', (bool)$wantOn); // UI sofort konsistent
+        $this->SetValue('Power', (bool)$wantOn);
 
-        // Aktion => Fast-Polling
         $this->SetValue('__LastChangeTS', time());
         $this->SetPollInterval($this->ReadPropertyInteger('PollFast'));
 
-        // Optionaler Sofort-Poll (ist jetzt safe, da Lock non-fatal ist)
         $this->Poll();
     }
 
@@ -159,10 +140,11 @@ class PJLinkProjector extends IPSModule
             return;
         }
 
-        // Soll-Input (Device Code) setzen
+        // Soll-Input speichern (Device + Logical)
         $this->SetValue('__CmdInput', $deviceCode);
+        $this->SetValue('__CmdInputLogical', $logical);
 
-        // UI: logischen Wert anzeigen
+        // UI: sofort Sollwert anzeigen (bleibt stabil bis erreicht)
         $this->SetValue('Input', $logical);
 
         // Input wählen => Power-Soll EIN
@@ -171,11 +153,9 @@ class PJLinkProjector extends IPSModule
             $this->SetValue('Power', true);
         }
 
-        // Aktion => Fast-Polling
         $this->SetValue('__LastChangeTS', time());
         $this->SetPollInterval($this->ReadPropertyInteger('PollFast'));
 
-        // Optionaler Sofort-Poll (safe)
         $this->Poll();
     }
 
@@ -197,8 +177,12 @@ class PJLinkProjector extends IPSModule
                 $timeout = 2;
 
                 // Vorwerte für Change-Detection
-                $prevPowerState = (int)$self->GetValue('PowerState');
+                $prevPowerState   = (int)$self->GetValue('PowerState');
                 $prevInputLogical = (int)$self->GetValue('Input');
+
+                // Sollwerte
+                $wantDeviceInput  = (int)$self->GetValue('__CmdInput');
+                $wantLogicalInput = (int)$self->GetValue('__CmdInputLogical');
 
                 // 1) PowerState lesen (gilt als Online, wenn erfolgreich)
                 $pwrState = $self->PJLinkGetPower($host, $port, $pw, $timeout);
@@ -224,18 +208,39 @@ class PJLinkProjector extends IPSModule
                 if ($pwrState === 0) $self->SetValue('Power', false);
                 if ($pwrState === 1) $self->SetValue('Power', true);
 
-                // Anzeige Input (logisch) aktualisieren, falls mappbar
+                // Ist-Input mappen
+                $curLogical = 0;
                 if ($curDeviceInput !== null) {
-                    $logical = $self->UnmapInputToLogical((int)$curDeviceInput);
-                    if ($logical !== 0) {
-                        $self->SetValue('Input', $logical);
-                    }
+                    $curLogical = $self->UnmapInputToLogical((int)$curDeviceInput);
                 }
 
-                // Soll-Quelle löschen, sobald erreicht
-                $wantDeviceInput = (int)$self->GetValue('__CmdInput');
-                if ($pwrState === 1 && $wantDeviceInput !== 0 && $curDeviceInput !== null && (int)$curDeviceInput === $wantDeviceInput) {
-                    $self->SetValue('__CmdInput', 0);
+                // === UX-FIX: UI-Input nicht "zurückflippen" solange Umschaltung pending ===
+                // Wenn __CmdInput != 0:
+                // - erst dann UI aktualisieren, wenn Ist == Soll (dann wird Soll gelöscht)
+                // - ansonsten UI so lassen (zeigt Sollwert, bleibt stabil)
+                if ($wantDeviceInput !== 0) {
+                    if ($curDeviceInput !== null && (int)$curDeviceInput === (int)$wantDeviceInput) {
+                        // erreicht: UI auf Ist (entspricht Soll) und Soll löschen
+                        if ($curLogical !== 0) {
+                            $self->SetValue('Input', $curLogical);
+                        } elseif ($wantLogicalInput !== 0) {
+                            // Fallback: zumindest logisch
+                            $self->SetValue('Input', $wantLogicalInput);
+                        }
+                        $self->SetValue('__CmdInput', 0);
+                        $self->SetValue('__CmdInputLogical', 0);
+                    } else {
+                        // pending: UI NICHT mit altem Ist überschreiben
+                        // (Optional) Wenn UI noch 0 ist, setze auf Soll
+                        if ((int)$self->GetValue('Input') === 0 && $wantLogicalInput !== 0) {
+                            $self->SetValue('Input', $wantLogicalInput);
+                        }
+                    }
+                } else {
+                    // kein pending: UI darf den Ist-Input spiegeln
+                    if ($curLogical !== 0) {
+                        $self->SetValue('Input', $curLogical);
+                    }
                 }
 
                 // Busy berechnen (Warmup/Cooldown/PendingInput)
@@ -247,17 +252,14 @@ class PJLinkProjector extends IPSModule
                 // Change-Detection: PowerState/Input haben sich geändert?
                 $changed = false;
 
-                // PowerState Änderung?
                 if ((int)$pwrState !== (int)$prevPowerState) {
                     $changed = true;
                 }
 
-                // Input Änderung? (nur wenn wir einen mappbaren Input haben)
-                if ($curDeviceInput !== null) {
-                    $newLogical = $self->UnmapInputToLogical((int)$curDeviceInput);
-                    if ($newLogical !== 0 && (int)$newLogical !== (int)$prevInputLogical) {
-                        $changed = true;
-                    }
+                // Input Änderung nur anhand des Ist-Inputs (wenn nicht pending) oder wenn erreicht
+                $newInputLogical = (int)$self->GetValue('Input');
+                if ((int)$newInputLogical !== (int)$prevInputLogical) {
+                    $changed = true;
                 }
 
                 if ($changed) {
@@ -272,15 +274,11 @@ class PJLinkProjector extends IPSModule
 
             } catch (Exception $e) {
 
-                // Offline & Diagnose
                 $self->SetOnlineError($e->getMessage());
-
-                // Beim Offline-Fall schnell pollen (Recovery)
                 $self->SetPollInterval($self->ReadPropertyInteger('PollFast'));
             }
         });
 
-        // Wenn Lock nicht bekommen: kurz danach erneut pollen (Timer läuft ohnehin)
         if ($ok === false) {
             $this->SetPollInterval($this->ReadPropertyInteger('PollFast'));
         }
@@ -288,7 +286,7 @@ class PJLinkProjector extends IPSModule
 
     private function ApplyLogic($ip, $port, $pw, $timeout, $pwrState, $curDeviceInput)
     {
-        $wantOn = (bool)$this->GetValue('__CmdPower');
+        $wantOn    = (bool)$this->GetValue('__CmdPower');
         $wantInput = (int)$this->GetValue('__CmdInput'); // Device Code
 
         // Cool-down: nichts forcieren, schnell pollen
@@ -327,6 +325,7 @@ class PJLinkProjector extends IPSModule
 
             // Nur schalten, wenn wir einen aktuellen Input kennen und er abweicht
             if ($cur !== 0 && $cur !== $wantInput) {
+
                 // Input-Delay nur nach echtem Power-On
                 $delay = (int)$this->ReadPropertyInteger('InputDelay');
                 $ts = (int)$this->GetValue('__PowerOnTS');
@@ -351,28 +350,24 @@ class PJLinkProjector extends IPSModule
         $busy   = (bool)$this->GetValue('Busy');
         $pwr    = (int)$this->GetValue('PowerState');
 
-        $fastAfter = (int)$this->ReadPropertyInteger('FastAfterChange');
+        $fastAfter  = (int)$this->ReadPropertyInteger('FastAfterChange');
         $lastChange = (int)$this->GetValue('__LastChangeTS');
 
-        // Offline → immer schnell
         if (!$online) {
             $this->SetPollInterval($this->ReadPropertyInteger('PollFast'));
             return;
         }
 
-        // Übergänge → schnell
         if ($busy || $pwr === 2 || $pwr === 3) {
             $this->SetPollInterval($this->ReadPropertyInteger('PollFast'));
             return;
         }
 
-        // Nach Statusänderung noch X Sekunden schnell pollen
         if ($fastAfter > 0 && $lastChange > 0 && (time() - $lastChange) < $fastAfter) {
             $this->SetPollInterval($this->ReadPropertyInteger('PollFast'));
             return;
         }
 
-        // Stabil → langsam
         $this->SetPollInterval($this->ReadPropertyInteger('PollSlow'));
     }
 
@@ -396,16 +391,12 @@ class PJLinkProjector extends IPSModule
     private function SetOnlineError($message)
     {
         $this->SetValue('Online', false);
-
-        // Busy zurücknehmen (ansonsten würde UI dauerhaft busy bleiben)
         $this->SetValue('Busy', false);
 
-        // ErrorCounter erhöhen
         $cnt = (int)$this->GetValue('ErrorCounter');
         $cnt++;
         $this->SetValue('ErrorCounter', $cnt);
 
-        // LastError nur setzen, wenn geändert (Spam vermeiden)
         $msg = (string)$message;
         if ((string)$this->GetValue('LastError') !== $msg) {
             $this->SetValue('LastError', $msg);
@@ -415,7 +406,6 @@ class PJLinkProjector extends IPSModule
     // ---------- Profiles ----------
     private function EnsureProfiles()
     {
-        // PowerState: 0=Off, 1=On, 2=Cool-down, 3=Warm-up
         if (!IPS_VariableProfileExists('PJP.PowerState')) {
             IPS_CreateVariableProfile('PJP.PowerState', VARIABLETYPE_INTEGER);
             IPS_SetVariableProfileIcon('PJP.PowerState', 'Power');
@@ -425,7 +415,6 @@ class PJLinkProjector extends IPSModule
         IPS_SetVariableProfileAssociation('PJP.PowerState', 2, 'Cool-down', '', 0);
         IPS_SetVariableProfileAssociation('PJP.PowerState', 3, 'Warm-up', '', 0);
 
-        // Input logisch: 1..3
         if (!IPS_VariableProfileExists('PJP.Input.Logical')) {
             IPS_CreateVariableProfile('PJP.Input.Logical', VARIABLETYPE_INTEGER);
             IPS_SetVariableProfileIcon('PJP.Input.Logical', 'TV');
@@ -440,14 +429,10 @@ class PJLinkProjector extends IPSModule
     {
         $vendor = (string)$this->ReadPropertyString('Vendor');
 
-        // Defaults:
-        // Sony typisch: HDMI1=31, HDMI2=32, HDBT=36
-        // Epson häufig: HDMI1=32, HDMI2=33, HDBT=56
         $defHDMI1 = ($vendor === 'SONY') ? 31 : 32;
         $defHDMI2 = ($vendor === 'SONY') ? 32 : 33;
         $defHDBT  = ($vendor === 'SONY') ? 36 : 56;
 
-        // Overrides (0 => default)
         $c1 = (int)$this->ReadPropertyInteger('CodeHDMI1');
         $c2 = (int)$this->ReadPropertyInteger('CodeHDMI2');
         $c3 = (int)$this->ReadPropertyInteger('CodeHDBT');
@@ -487,7 +472,7 @@ class PJLinkProjector extends IPSModule
 
         stream_set_timeout($fp, (int)$timeoutSec);
 
-        $handshake = trim((string)fgets($fp, 512)); // "PJLINK 0" oder "PJLINK 1 <RANDOM>"
+        $handshake = trim((string)fgets($fp, 512));
         if (strpos($handshake, 'PJLINK ') !== 0) {
             fclose($fp);
             throw new Exception("Ungültiger PJLink Handshake: '$handshake'");
@@ -557,12 +542,10 @@ class PJLinkProjector extends IPSModule
     }
 
     // ---------- Lock (Semaphore Fix) ----------
-    // Liefert true, wenn Lock bekommen und fn ausgeführt wurde, sonst false (non-fatal).
     private function WithLock($name, $fn)
     {
         $key = 'PJP_' . $this->InstanceID . '_' . (string)$name;
 
-        // Kurzer Timeout: wir wollen nicht blockieren
         if (!IPS_SemaphoreEnter($key, 200)) {
             $this->LogMessage('Semaphore busy (' . $name . ') – wird beim nächsten Poll ausgeführt.', KL_DEBUG);
             return false;
