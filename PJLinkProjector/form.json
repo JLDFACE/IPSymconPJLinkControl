@@ -13,14 +13,17 @@
     { "type": "NumberSpinner", "name": "Port", "caption": "PJLink Port", "minimum": 1, "maximum": 65535 },
     { "type": "PasswordTextBox", "name": "Password", "caption": "PJLink Passwort (leer wenn aus)" },
 
-    { "type": "Label", "caption": "Input-Codes: leer/0 = Standard pro Hersteller. Nur nötig, wenn Ihr Gerät abweicht." },
+    { "type": "Label", "caption": "Input-Codes: 0 = Standard pro Hersteller. Nur nötig, wenn Ihr Gerät abweicht." },
     { "type": "NumberSpinner", "name": "CodeHDMI1", "caption": "Code HDMI 1", "minimum": 0, "maximum": 99 },
     { "type": "NumberSpinner", "name": "CodeHDMI2", "caption": "Code HDMI 2", "minimum": 0, "maximum": 99 },
     { "type": "NumberSpinner", "name": "CodeHDBT",  "caption": "Code HDBaseT", "minimum": 0, "maximum": 99 },
 
     { "type": "NumberSpinner", "name": "InputDelay", "caption": "Input-Delay nach echtem Power-On (Sek.)", "minimum": 0, "maximum": 120 },
+
     { "type": "NumberSpinner", "name": "PollFast", "caption": "Polling schnell (Sek.)", "minimum": 1, "maximum": 60 },
-    { "type": "NumberSpinner", "name": "PollSlow", "caption": "Polling langsam (Sek.)", "minimum": 5, "maximum": 600 }
+    { "type": "NumberSpinner", "name": "PollSlow", "caption": "Polling langsam (Sek.)", "minimum": 5, "maximum": 600 },
+
+    { "type": "NumberSpinner", "name": "FastAfterChange", "caption": "Nach Statusänderung schnell pollen (Sek.)", "minimum": 0, "maximum": 300 }
   ],
   "actions": [
     { "type": "Button", "caption": "Jetzt Status aktualisieren", "onClick": "PJP_Poll($id);" }
