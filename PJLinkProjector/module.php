@@ -30,7 +30,7 @@ class PJLinkProjector extends IPSModule
         $this->RegisterPropertyInteger('InputDelay', 10);
 
         // Polling Defaults
-        $this->RegisterPropertyInteger('PollFast', 5);
+        $this->RegisterPropertyInteger('PollFast', 2);
         $this->RegisterPropertyInteger('PollSlow', 15);
 
         // Nach Statusänderung noch X Sekunden schnell pollen
