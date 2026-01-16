@@ -82,14 +82,14 @@ class PJLinkProjector extends IPSModule
         $this->RegisterVariableInteger('__CmdInputLogical', '__CMD Input (Logical)', '');
         IPS_SetHidden($this->GetIDForIdent('__CmdInputLogical'), true);
 
-        $this->RegisterVariableInteger('__PowerOnTS', '__PowerOn TS', '');
+        $this->RegisterVariableInteger('__PowerOnTS', '__PowerOn TS', '~UnixTimestamp');
         IPS_SetHidden($this->GetIDForIdent('__PowerOnTS'), true);
 
         $this->RegisterVariableInteger('__LastPwr', '__Last PowerState', '');
         IPS_SetHidden($this->GetIDForIdent('__LastPwr'), true);
 
         // Timestamp der letzten erkannten Statusänderung (für FastAfterChange)
-        $this->RegisterVariableInteger('__LastChangeTS', '__Last Change TS', '');
+        $this->RegisterVariableInteger('__LastChangeTS', '__Last Change TS', '~UnixTimestamp');
         IPS_SetHidden($this->GetIDForIdent('__LastChangeTS'), true);
 
         // Timer aktivieren
