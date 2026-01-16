@@ -94,9 +94,10 @@ Nach dem Hinzufügen das Modul aktualisieren.
 ## Funktionsweise
 
 - Die Kommunikation erfolgt **ohne IO-Instanz** direkt per TCP (Request/Response).
+- Befehle werden **sofort** beim Bedienen gesendet (keine Poll-Verzögerung).
 - Beim Setzen einer Quelle wird der Projektor automatisch eingeschaltet.
-- Während einer laufenden Quellenumschaltung bleibt die Anzeige stabil auf dem Sollwert.
-- Die Quelle wird intern als „pending“ behandelt, bis der Projektor den Sollzustand erreicht.
+- Während einer laufenden Umschaltung bleiben Power und Input **stabil auf dem Sollwert** (kein Flipping).
+- Die Quelle wird intern als „pending" behandelt, bis der Projektor den Sollzustand erreicht.
 - Polling passt sich automatisch dem Betriebszustand an:
   - Schnell bei Übergängen
   - Langsam im stabilen Zustand
