@@ -23,7 +23,8 @@
     { "type": "NumberSpinner", "name": "PollFast", "caption": "Polling schnell (Sek.)", "minimum": 1, "maximum": 60 },
     { "type": "NumberSpinner", "name": "PollSlow", "caption": "Polling langsam (Sek.)", "minimum": 5, "maximum": 600 },
 
-    { "type": "NumberSpinner", "name": "FastAfterChange", "caption": "Nach Statusänderung schnell pollen (Sek.)", "minimum": 0, "maximum": 300 }
+    { "type": "NumberSpinner", "name": "FastAfterChange", "caption": "Nach Statusänderung schnell pollen (Sek.)", "minimum": 0, "maximum": 300 },
+    { "type": "NumberSpinner", "name": "ErrorLogCooldown", "caption": "Fehler-Log Drosselung (Sek., 0 = aus)", "minimum": 0, "maximum": 3600 }
   ],
   "actions": [
     { "type": "Button", "caption": "Jetzt Status aktualisieren", "onClick": "PJP_Poll($id);" }

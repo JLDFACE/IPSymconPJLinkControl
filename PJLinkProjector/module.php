@@ -36,6 +36,9 @@ class PJLinkProjector extends IPSModule
         // Nach Statusänderung noch X Sekunden schnell pollen
         $this->RegisterPropertyInteger('FastAfterChange', 30);
 
+        // Fehlermeldungen drosseln (Sekunden, 0 = keine Drosselung)
+        $this->RegisterPropertyInteger('ErrorLogCooldown', 60);
+
         // Timer ruft Poll() über Prefix-Funktion auf
         $this->RegisterTimer('PollTimer', 0, 'PJP_Poll($_IPS[\'TARGET\']);');
 
@@ -178,7 +181,7 @@ class PJLinkProjector extends IPSModule
 
             $this->PJLinkSetPower($host, $port, $pw, $wantOn ? 1 : 0, $timeout);
         } catch (Exception $e) {
-            $this->LogMessage('Sofort-Power-Befehl fehlgeschlagen: ' . $e->getMessage(), KL_WARNING);
+            $this->LogWarningThrottled('Sofort-Power-Befehl fehlgeschlagen: ' . $e->getMessage());
         }
     }
 
@@ -220,7 +223,7 @@ class PJLinkProjector extends IPSModule
                 // Sonst wartet ApplyLogic beim nächsten Poll
             }
         } catch (Exception $e) {
-            $this->LogMessage('Sofort-Input-Befehl fehlgeschlagen: ' . $e->getMessage(), KL_WARNING);
+            $this->LogWarningThrottled('Sofort-Input-Befehl fehlgeschlagen: ' . $e->getMessage());
         }
     }
 
@@ -446,6 +449,8 @@ class PJLinkProjector extends IPSModule
     {
         if (!(bool)$this->GetValue('Online')) {
             $this->SetValue('Online', true);
+            $this->SetBuffer('WarnMsg', '');
+            $this->SetBuffer('WarnTs', '0');
         }
 
         if ((int)$this->GetValue('ErrorCounter') !== 0) {
@@ -471,6 +476,25 @@ class PJLinkProjector extends IPSModule
         $msg = (string)$message;
         if ((string)$this->GetValue('LastError') !== $msg) {
             $this->SetValue('LastError', $msg);
+        }
+    }
+
+    private function LogWarningThrottled($message)
+    {
+        $cooldown = (int)$this->ReadPropertyInteger('ErrorLogCooldown');
+        if ($cooldown <= 0) {
+            $this->LogMessage($message, KL_WARNING);
+            return;
+        }
+
+        $lastMsg = (string)$this->GetBuffer('WarnMsg');
+        $lastTs = (int)$this->GetBuffer('WarnTs');
+        $now = time();
+
+        if ($message !== $lastMsg || $lastTs === 0 || ($now - $lastTs) >= $cooldown) {
+            $this->LogMessage($message, KL_WARNING);
+            $this->SetBuffer('WarnMsg', $message);
+            $this->SetBuffer('WarnTs', (string)$now);
         }
     }
 

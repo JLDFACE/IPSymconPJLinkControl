@@ -52,6 +52,7 @@ Nach dem Hinzufügen das Modul aktualisieren.
 | PollFast | Polling-Intervall bei Übergängen |
 | PollSlow | Polling-Intervall im stabilen Zustand |
 | FastAfterChange | Zeitspanne für schnelles Polling nach Statusänderungen |
+| Fehler-Log Drosselung | Mindestabstand zwischen identischen Warnungen (Sek., 0 = aus) |
 
 ### Default-Inputcodes
 
@@ -122,6 +123,7 @@ Nach dem Hinzufügen das Modul aktualisieren.
 
 - Verbindungs- oder Protokollfehler setzen `Online = false`
 - Fehler werden in `LastError` gespeichert
+- Warnungen für fehlgeschlagene Sofort-Befehle werden gedrosselt (konfigurierbar)
 - Keine Fatal Errors bei parallelen Timer- und Bedienaktionen
 - Sperrmechanismen (Semaphore) sind non-fatal ausgeführt
 
