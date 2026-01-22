@@ -88,11 +88,18 @@ class PJLinkProjector extends IPSModule
         $this->RegisterVariableInteger('__CmdInputLogical', '__CMD Input (Logical)', '');
         IPS_SetHidden($this->GetIDForIdent('__CmdInputLogical'), true);
 
+        // Merkt den Ist-Input zum Zeitpunkt des Umschaltbefehls (für manuelle Override-Erkennung)
+        $this->RegisterVariableInteger('__CmdInputPrevDevice', '__CMD Input (PrevDevice)', '');
+        IPS_SetHidden($this->GetIDForIdent('__CmdInputPrevDevice'), true);
+
         $this->RegisterVariableInteger('__PowerOnTS', '__PowerOn TS', '~UnixTimestamp');
         IPS_SetHidden($this->GetIDForIdent('__PowerOnTS'), true);
 
         $this->RegisterVariableInteger('__LastPwr', '__Last PowerState', '');
         IPS_SetHidden($this->GetIDForIdent('__LastPwr'), true);
+
+        $this->RegisterVariableInteger('__LastDeviceInput', '__Last Device Input', '');
+        IPS_SetHidden($this->GetIDForIdent('__LastDeviceInput'), true);
 
         // Timestamp der letzten erkannten Statusänderung (für FastAfterChange)
         $this->RegisterVariableInteger('__LastChangeTS', '__Last Change TS', '~UnixTimestamp');
@@ -149,9 +156,16 @@ class PJLinkProjector extends IPSModule
             return;
         }
 
+        $prevDeviceInput = (int)$this->GetValue('__LastDeviceInput');
+        if ($prevDeviceInput === 0) {
+            $prevLogical = (int)$this->GetValue('Input');
+            $prevDeviceInput = $this->MapInputToDevice($prevLogical);
+        }
+
         // Soll-Input speichern (Device + Logical)
         $this->SetValue('__CmdInput', $deviceCode);
         $this->SetValue('__CmdInputLogical', $logical);
+        $this->SetValue('__CmdInputPrevDevice', $prevDeviceInput);
 
         // UI: sofort Sollwert anzeigen (bleibt stabil bis erreicht)
         $this->SetValue('Input', $logical);
@@ -273,6 +287,7 @@ class PJLinkProjector extends IPSModule
                     $self->SetValue('__CmdPower', false);
                     $self->SetValue('__CmdInput', 0);
                     $self->SetValue('__CmdInputLogical', 0);
+                    $self->SetValue('__CmdInputPrevDevice', 0);
                     $self->SetValue('Power', false);
                     $wantDeviceInput = 0;
                     $wantLogicalInput = 0;
@@ -312,19 +327,39 @@ class PJLinkProjector extends IPSModule
                 // - erst dann UI aktualisieren, wenn Ist == Soll (dann wird Soll gelöscht)
                 // - ansonsten UI so lassen (zeigt Sollwert, bleibt stabil)
                 if ($wantDeviceInput !== 0) {
-                    if ($curDeviceInput !== null && (int)$curDeviceInput === (int)$wantDeviceInput) {
-                        // erreicht: UI auf Ist (entspricht Soll) und Soll löschen
-                        if ($curLogical !== 0) {
-                            $self->SetValue('Input', $curLogical);
-                        } elseif ($wantLogicalInput !== 0) {
-                            // Fallback: zumindest logisch
-                            $self->SetValue('Input', $wantLogicalInput);
+                    if ($curDeviceInput !== null) {
+                        $prevDeviceInput = (int)$self->GetValue('__CmdInputPrevDevice');
+
+                        // Manuelle Quellenwahl am Gerät: Input geändert, aber nicht auf Soll -> Soll zurücksetzen
+                        if ($prevDeviceInput !== 0
+                            && (int)$curDeviceInput !== (int)$wantDeviceInput
+                            && (int)$curDeviceInput !== (int)$prevDeviceInput) {
+                            $self->SetValue('__CmdInput', 0);
+                            $self->SetValue('__CmdInputLogical', 0);
+                            $self->SetValue('__CmdInputPrevDevice', 0);
+                            if ($curLogical !== 0) {
+                                $self->SetValue('Input', $curLogical);
+                            }
+                        } elseif ((int)$curDeviceInput === (int)$wantDeviceInput) {
+                            // erreicht: UI auf Ist (entspricht Soll) und Soll löschen
+                            if ($curLogical !== 0) {
+                                $self->SetValue('Input', $curLogical);
+                            } elseif ($wantLogicalInput !== 0) {
+                                // Fallback: zumindest logisch
+                                $self->SetValue('Input', $wantLogicalInput);
+                            }
+                            $self->SetValue('__CmdInput', 0);
+                            $self->SetValue('__CmdInputLogical', 0);
+                            $self->SetValue('__CmdInputPrevDevice', 0);
+                        } else {
+                            // pending: UI NICHT mit altem Ist überschreiben
+                            // (Optional) Wenn UI noch 0 ist, setze auf Soll
+                            if ((int)$self->GetValue('Input') === 0 && $wantLogicalInput !== 0) {
+                                $self->SetValue('Input', $wantLogicalInput);
+                            }
                         }
-                        $self->SetValue('__CmdInput', 0);
-                        $self->SetValue('__CmdInputLogical', 0);
                     } else {
-                        // pending: UI NICHT mit altem Ist überschreiben
-                        // (Optional) Wenn UI noch 0 ist, setze auf Soll
+                        // pending ohne Ist-Input: UI nicht überschreiben
                         if ((int)$self->GetValue('Input') === 0 && $wantLogicalInput !== 0) {
                             $self->SetValue('Input', $wantLogicalInput);
                         }
@@ -361,6 +396,11 @@ class PJLinkProjector extends IPSModule
 
                 // Logik anwenden (schalten)
                 $self->ApplyLogic($host, $port, $pw, $timeout, $pwrState, $curDeviceInput);
+
+                // Letzten Ist-Input merken
+                if ($curDeviceInput !== null) {
+                    $self->SetValue('__LastDeviceInput', (int)$curDeviceInput);
+                }
 
                 // Polling-Strategie
                 $self->ApplyPollingStrategy();
@@ -467,12 +507,13 @@ class PJLinkProjector extends IPSModule
                     return;
                 } catch (Exception $e) {
                     if ($this->IsInputParameterError($e->getMessage())) {
-                        $this->SetValue('__CmdInput', 0);
-                        $this->SetValue('__CmdInputLogical', 0);
+                    $this->SetValue('__CmdInput', 0);
+                    $this->SetValue('__CmdInputLogical', 0);
+                    $this->SetValue('__CmdInputPrevDevice', 0);
 
-                        $curLogical = ($curDeviceInput === null) ? 0 : $this->UnmapInputToLogical((int)$curDeviceInput);
-                        if ($curLogical !== 0) {
-                            $this->SetValue('Input', $curLogical);
+                    $curLogical = ($curDeviceInput === null) ? 0 : $this->UnmapInputToLogical((int)$curDeviceInput);
+                    if ($curLogical !== 0) {
+                        $this->SetValue('Input', $curLogical);
                         }
 
                         $this->LogWarningThrottled('Input-Befehl abgewiesen (ERR2) – Inputcode prüfen.');
