@@ -61,6 +61,9 @@ class PJLinkProjector extends IPSModule
 
         $this->RegisterVariableBoolean('Busy', 'Projektor Busy', '~Switch');
 
+        // Diagnose
+        $this->RegisterVariableString('AvailableInputs', 'Verfügbare Inputs', '');
+
         // Online/Diagnose
         $this->RegisterVariableBoolean('Online', 'Projektor Online', '');
         $this->RegisterVariableString('LastError', 'Projektor LastError', '');
@@ -171,60 +174,66 @@ class PJLinkProjector extends IPSModule
     // ---------- Sofort-Befehle (ohne Poll-Verzögerung) ----------
     private function SendPowerCommandNow($wantOn)
     {
-        try {
-            $host = trim($this->ReadPropertyString('Host'));
-            if ($host === '') return;
+        $self = $this;
+        $this->WithLock('poll', function () use ($self, $wantOn) {
+            try {
+                $host = trim($self->ReadPropertyString('Host'));
+                if ($host === '') return;
 
-            $port = (int)$this->ReadPropertyInteger('Port');
-            $pw   = (string)$this->ReadPropertyString('Password');
-            $timeout = 2;
+                $port = (int)$self->ReadPropertyInteger('Port');
+                $pw   = (string)$self->ReadPropertyString('Password');
+                $timeout = 2;
 
-            $this->PJLinkSetPower($host, $port, $pw, $wantOn ? 1 : 0, $timeout);
-        } catch (Exception $e) {
-            $this->LogWarningThrottled('Sofort-Power-Befehl fehlgeschlagen: ' . $e->getMessage());
-        }
+                $self->PJLinkSetPower($host, $port, $pw, $wantOn ? 1 : 0, $timeout);
+            } catch (Exception $e) {
+                $self->HandleImmediateCommandError('Sofort-Power-Befehl', $e);
+            }
+        });
     }
 
     private function SendInputCommandNow($deviceCode)
     {
-        try {
-            $host = trim($this->ReadPropertyString('Host'));
-            if ($host === '') return;
+        $self = $this;
+        $this->WithLock('poll', function () use ($self, $deviceCode) {
+            try {
+                $host = trim($self->ReadPropertyString('Host'));
+                if ($host === '') return;
 
-            $port = (int)$this->ReadPropertyInteger('Port');
-            $pw   = (string)$this->ReadPropertyString('Password');
-            $timeout = 2;
+                $port = (int)$self->ReadPropertyInteger('Port');
+                $pw   = (string)$self->ReadPropertyString('Password');
+                $timeout = 2;
 
-            // Prüfen ob Projektor bereit ist (Power State)
-            $pwrState = (int)$this->GetValue('PowerState');
+                // Prüfen ob Projektor bereit ist (Power State)
+                $pwrState = (int)$self->GetValue('PowerState');
 
-            // Wenn aus: erst einschalten
-            if ($pwrState === 0) {
-                $this->PJLinkSetPower($host, $port, $pw, 1, $timeout);
-                // Input wird beim nächsten Poll gesetzt (nach Warmup)
-                return;
-            }
-
-            // Wenn Warmup: Input wird automatisch beim nächsten Poll gesetzt
-            if ($pwrState === 3) {
-                return;
-            }
-
-            // Wenn An: Input-Delay prüfen
-            if ($pwrState === 1) {
-                $delay = (int)$this->ReadPropertyInteger('InputDelay');
-                $ts = (int)$this->GetValue('__PowerOnTS');
-                $elapsed = ($ts > 0) ? (time() - $ts) : 9999;
-
-                // Nur senden wenn Delay abgelaufen
-                if ($elapsed >= $delay) {
-                    $this->PJLinkSetInput($host, $port, $pw, $deviceCode, $timeout);
+                // Wenn aus: erst einschalten
+                if ($pwrState === 0) {
+                    $self->PJLinkSetPower($host, $port, $pw, 1, $timeout);
+                    // Input wird beim nächsten Poll gesetzt (nach Warmup)
+                    return;
                 }
-                // Sonst wartet ApplyLogic beim nächsten Poll
+
+                // Wenn Warmup: Input wird automatisch beim nächsten Poll gesetzt
+                if ($pwrState === 3) {
+                    return;
+                }
+
+                // Wenn An: Input-Delay prüfen
+                if ($pwrState === 1) {
+                    $delay = (int)$self->ReadPropertyInteger('InputDelay');
+                    $ts = (int)$self->GetValue('__PowerOnTS');
+                    $elapsed = ($ts > 0) ? (time() - $ts) : 9999;
+
+                    // Nur senden wenn Delay abgelaufen
+                    if ($elapsed >= $delay) {
+                        $self->PJLinkSetInput($host, $port, $pw, $deviceCode, $timeout);
+                    }
+                    // Sonst wartet ApplyLogic beim nächsten Poll
+                }
+            } catch (Exception $e) {
+                $self->HandleImmediateCommandError('Sofort-Input-Befehl', $e);
             }
-        } catch (Exception $e) {
-            $this->LogWarningThrottled('Sofort-Input-Befehl fehlgeschlagen: ' . $e->getMessage());
-        }
+        });
     }
 
     // ---------- Polling / Main ----------
@@ -258,6 +267,16 @@ class PJLinkProjector extends IPSModule
 
                 // Online & Diagnose: Erfolg
                 $self->SetOnlineOk();
+
+                // Projektor hat sich selbst ausgeschaltet -> Sollzustand zurücksetzen
+                if ($pwrState === 0 && $prevPowerState === 1 && (bool)$self->GetValue('__CmdPower')) {
+                    $self->SetValue('__CmdPower', false);
+                    $self->SetValue('__CmdInput', 0);
+                    $self->SetValue('__CmdInputLogical', 0);
+                    $self->SetValue('Power', false);
+                    $wantDeviceInput = 0;
+                    $wantLogicalInput = 0;
+                }
 
                 // Delay-Start nur bei echtem Power-On (0 -> !=0)
                 $last = (int)$self->GetValue('__LastPwr');
@@ -358,6 +377,37 @@ class PJLinkProjector extends IPSModule
         }
     }
 
+    public function RefreshAvailableInputs()
+    {
+        $result = '';
+        $self = $this;
+
+        $ok = $this->WithLock('poll', function () use ($self, &$result) {
+            try {
+                $host = trim($self->ReadPropertyString('Host'));
+                if ($host === '') {
+                    throw new Exception('Host ist leer.');
+                }
+
+                $port = (int)$self->ReadPropertyInteger('Port');
+                $pw   = (string)$self->ReadPropertyString('Password');
+                $timeout = 2;
+
+                $inputs = $self->PJLinkGetAvailableInputs($host, $port, $pw, $timeout);
+                $result = implode(' ', $inputs);
+                $self->SetValue('AvailableInputs', $result);
+            } catch (Exception $e) {
+                $self->HandleImmediateCommandError('INST-Abfrage', $e);
+            }
+        });
+
+        if ($ok === false) {
+            return '';
+        }
+
+        return $result;
+    }
+
     private function ApplyLogic($ip, $port, $pw, $timeout, $pwrState, $curDeviceInput)
     {
         $wantOn    = (bool)$this->GetValue('__CmdPower');
@@ -410,10 +460,26 @@ class PJLinkProjector extends IPSModule
                     return;
                 }
 
-                $this->PJLinkSetInput($ip, (int)$port, $pw, $wantInput, (int)$timeout);
-                $this->SetValue('__LastChangeTS', time());
-                $this->SetPollInterval($this->ReadPropertyInteger('PollFast'));
-                return;
+                try {
+                    $this->PJLinkSetInput($ip, (int)$port, $pw, $wantInput, (int)$timeout);
+                    $this->SetValue('__LastChangeTS', time());
+                    $this->SetPollInterval($this->ReadPropertyInteger('PollFast'));
+                    return;
+                } catch (Exception $e) {
+                    if ($this->IsInputParameterError($e->getMessage())) {
+                        $this->SetValue('__CmdInput', 0);
+                        $this->SetValue('__CmdInputLogical', 0);
+
+                        $curLogical = ($curDeviceInput === null) ? 0 : $this->UnmapInputToLogical((int)$curDeviceInput);
+                        if ($curLogical !== 0) {
+                            $this->SetValue('Input', $curLogical);
+                        }
+
+                        $this->LogWarningThrottled('Input-Befehl abgewiesen (ERR2) – Inputcode prüfen.');
+                        return;
+                    }
+                    throw $e;
+                }
             }
         }
     }
@@ -496,6 +562,31 @@ class PJLinkProjector extends IPSModule
             $this->SetBuffer('WarnMsg', $message);
             $this->SetBuffer('WarnTs', (string)$now);
         }
+    }
+
+    private function HandleImmediateCommandError($label, Exception $e)
+    {
+        $msg = $e->getMessage();
+        if ($this->IsTransientPJLinkError($msg)) {
+            $this->LogMessage($label . ' übersprungen (Projektor nicht bereit/erreichbar).', KL_DEBUG);
+            return;
+        }
+
+        $this->LogWarningThrottled($label . ' fehlgeschlagen: ' . $msg);
+    }
+
+    private function IsTransientPJLinkError($message)
+    {
+        if (strpos($message, 'Ungültiger PJLink Handshake') === 0) return true;
+        if (strpos($message, 'PJLink Verbindung fehlgeschlagen') === 0) return true;
+        return false;
+    }
+
+    private function IsInputParameterError($message)
+    {
+        if (strpos($message, '(ERR2)') !== false) return true;
+        if (strpos($message, '%1INPT=ERR2') !== false) return true;
+        return false;
     }
 
     // ---------- Profiles ----------
@@ -625,10 +716,30 @@ class PJLinkProjector extends IPSModule
         throw new Exception("INPT? unerwartet: $r");
     }
 
+    private function PJLinkGetAvailableInputs($ip, $port, $pw, $timeout)
+    {
+        $r = $this->PJLinkSend($ip, $port, $pw, "%1INST ?", $timeout);
+
+        if (preg_match('/%1INST=([0-9A-Za-z ]*)/', $r, $m)) {
+            $list = trim($m[1]);
+            if ($list === '') {
+                return [];
+            }
+            return preg_split('/\s+/', $list);
+        }
+        if (strpos($r, "%1INST=ERR3") === 0) {
+            throw new Exception("INST nicht verfügbar (ERR3).");
+        }
+        throw new Exception("INST? unerwartet: $r");
+    }
+
     private function PJLinkSetInput($ip, $port, $pw, $input, $timeout)
     {
         $r = $this->PJLinkSend($ip, $port, $pw, "%1INPT " . (int)$input, $timeout);
         if (strpos($r, "%1INPT=OK") === 0) return;
+        if (strpos($r, "%1INPT=ERR2") === 0) {
+            throw new Exception("INPT set ungültig (ERR2) – Eingangscode nicht akzeptiert.");
+        }
         if (strpos($r, "%1INPT=ERR3") === 0) {
             throw new Exception("INPT set nicht verfügbar (ERR3) – Projektor noch nicht bereit.");
         }
