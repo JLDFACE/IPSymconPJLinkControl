@@ -407,6 +407,12 @@ class PJLinkProjector extends IPSModule
 
             } catch (Exception $e) {
 
+                if ($self->IsTransientPJLinkError($e->getMessage()) && $self->IsLikelyPowerTransition()) {
+                    $self->LogMessage('PJLink transient during power transition.', KL_DEBUG);
+                    $self->SetPollInterval($self->ReadPropertyInteger('PollFast'));
+                    return;
+                }
+
                 $self->SetOnlineError($e->getMessage());
                 $self->SetPollInterval($self->ReadPropertyInteger('PollFast'));
             }
@@ -620,6 +626,20 @@ class PJLinkProjector extends IPSModule
     {
         if (strpos($message, 'Ungültiger PJLink Handshake') === 0) return true;
         if (strpos($message, 'PJLink Verbindung fehlgeschlagen') === 0) return true;
+        return false;
+    }
+
+    private function IsLikelyPowerTransition()
+    {
+        $pwrState = (int)$this->GetValue('PowerState');
+        $wantOn = (bool)$this->GetValue('__CmdPower');
+        if ($pwrState === 2 || $pwrState === 3) return true;
+        if ($wantOn && $pwrState === 0) return true;
+        if (!$wantOn && $pwrState === 1) return true;
+
+        $fastAfter = (int)$this->ReadPropertyInteger('FastAfterChange');
+        $lastChange = (int)$this->GetValue('__LastChangeTS');
+        if ($fastAfter > 0 && $lastChange > 0 && (time() - $lastChange) < $fastAfter) return true;
         return false;
     }
 
