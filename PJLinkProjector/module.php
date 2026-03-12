@@ -298,6 +298,21 @@ class PJLinkProjector extends IPSModule
                 if ($last === 0 && $pwrState !== 0) {
                     $self->SetValue('__PowerOnTS', time());
                 }
+
+                // Manuelle Abschaltung erkennen (mit Cooldown):
+                // Cooldown (2) -> Aus (0) obwohl __CmdPower noch true
+                // => externe Abschaltung, Sollwert synchronisieren
+                if ($last === 2 && $pwrState === 0 && (bool)$self->GetValue('__CmdPower')) {
+                    $self->SetValue('__CmdPower', false);
+                    $self->SetValue('Power', false);
+                    $self->SetValue('__CmdInput', 0);
+                    $self->SetValue('__CmdInputLogical', 0);
+                    $self->SetValue('__CmdInputPrevDevice', 0);
+                    $wantDeviceInput = 0;
+                    $wantLogicalInput = 0;
+                    $self->LogMessage('Manuelle Abschaltung am Gerät erkannt (nach Cooldown) – Sollwert auf AUS gesetzt.', KL_NOTIFY);
+                }
+
                 $self->SetValue('__LastPwr', $pwrState);
 
                 // 2) Input lesen (nur wenn nicht AUS), ERR3 tolerant
