@@ -187,6 +187,9 @@ class PJLinkProjector extends IPSModule
 
         // Timer aktivieren
         $this->SetPollInterval($this->ReadPropertyInteger('PollSlow'));
+
+        // Helligkeitswerte einmal initial aus dem Gerät ziehen (falls aktiviert & an)
+        $this->RefreshLightNow();
     }
 
     // ---------- Actions ----------
@@ -983,6 +986,7 @@ class PJLinkProjector extends IPSModule
         }
         $this->MarkManualOverride();
         $this->ApplyLightMode((int)$mode);
+        $this->RefreshLightNow(); // Modus + zugehörigen Pegel sofort aus dem Gerät nachziehen
     }
 
     public function SetLightLevel($level)
@@ -993,6 +997,7 @@ class PJLinkProjector extends IPSModule
         }
         $this->MarkManualOverride();
         $this->ApplyLightLevel((int)$level);
+        $this->RefreshLightNow();
     }
 
     private function ApplyLightMode($mode)
@@ -1151,6 +1156,21 @@ class PJLinkProjector extends IPSModule
         if ($last > 0 && ($now - $last) < 12) return;
         $this->SetBuffer('LightPollTS', (string)$now);
 
+        $this->ReadLightInto();
+    }
+
+    // Liest Modus + Pegel SOFORT aus dem Gerät und aktualisiert die Variablen
+    // (ohne Drosselung). Für unmittelbares UI-Feedback nach einem Set und initial.
+    public function RefreshLightNow()
+    {
+        if (!$this->ReadPropertyBoolean('EnableBrightness')) return;
+        if ((int)$this->GetValue('PowerState') !== 1) return;
+        $this->SetBuffer('LightPollTS', (string)time()); // Drossel-Timer zurücksetzen
+        $this->ReadLightInto();
+    }
+
+    private function ReadLightInto()
+    {
         try {
             $mode = $this->EpsonWebGet('LUMINANCE?');
             if ($mode !== null && $mode !== 'ERR' && preg_match('/^\d+$/', $mode)) {
@@ -1160,8 +1180,8 @@ class PJLinkProjector extends IPSModule
             if ($lvl !== null && $lvl !== 'ERR' && preg_match('/^\d+$/', $lvl)) {
                 $this->SetValueIfChanged('LightLevel', (int)$lvl);
             }
-        } catch (Exception $e) {
-            $this->LogMessage('Light-Poll fehlgeschlagen: ' . $e->getMessage(), KL_DEBUG);
+        } catch (Throwable $e) {
+            $this->LogMessage('Light-Abfrage fehlgeschlagen: ' . $e->getMessage(), KL_DEBUG);
         }
     }
 
