@@ -112,23 +112,36 @@ class PJLinkProjector extends IPSModule
         $this->RegisterVariableInteger('__AutoPausedUntil', '__Auto Paused Until', '');
         IPS_SetHidden($this->GetIDForIdent('__AutoPausedUntil'), true);
 
-        // Nachrichten-Registrierung für den Helligkeitssensor (VM_UPDATE) neu aufsetzen
+        // Nachrichten-/Referenz-Registrierung für den Helligkeitssensor (VM_UPDATE) neu aufsetzen.
+        // Robust: eine bereits gelöschte/verwaiste Objekt-ID darf ApplyChanges niemals abbrechen.
         foreach ($this->GetMessageList() as $senderID => $messages) {
             foreach ($messages as $msg) {
                 if ($msg == VM_UPDATE) {
-                    $this->UnregisterMessage($senderID, VM_UPDATE);
+                    try {
+                        $this->UnregisterMessage($senderID, VM_UPDATE);
+                    } catch (Throwable $e) {
+                        // verwaiste Registrierung (Objekt existiert nicht mehr) -> ignorieren
+                    }
                 }
             }
         }
         foreach ($this->GetReferenceList() as $refID) {
-            $this->UnregisterReference($refID);
+            try {
+                $this->UnregisterReference($refID);
+            } catch (Throwable $e) {
+                // verwaiste Referenz -> ignorieren
+            }
         }
         $ambID = (int)$this->ReadPropertyInteger('AmbientVariableID');
         if ($this->ReadPropertyBoolean('EnableBrightness')
             && $this->ReadPropertyBoolean('AutoBrightnessEnable')
             && $ambID > 0 && @IPS_VariableExists($ambID)) {
-            $this->RegisterReference($ambID);
-            $this->RegisterMessage($ambID, VM_UPDATE);
+            try {
+                $this->RegisterReference($ambID);
+                $this->RegisterMessage($ambID, VM_UPDATE);
+            } catch (Throwable $e) {
+                $this->LogMessage('Helligkeitssensor konnte nicht registriert werden: ' . $e->getMessage(), KL_WARNING);
+            }
         }
 
         // Online/Diagnose
