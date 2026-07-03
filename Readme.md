@@ -3,6 +3,11 @@
 Dieses Modul ermöglicht die Steuerung von Projektoren über **PJLink (Class 1)** in **IP-Symcon**.  
 Unterstützt werden aktuell **Sony**- und **Epson**-Projektoren mit HDMI- und HDBaseT-Eingängen.
 
+Zusätzlich kann für **Epson-Modelle mit Epson Web Control** die **Laser-Lichtleistung / Helligkeit**
+gesteuert werden (getestet am **Epson QS100**) – inklusive einer **automatischen Anpassung an die
+Raumhelligkeit** über einen verknüpften Helligkeitssensor (z. B. KNX-Lux-Wert). Da PJLink selbst
+keinen Helligkeitsbefehl kennt, läuft dieser Teil über die HTTP-API der Epson Web Control.
+
 Das Modul ist für den stabilen Betrieb auf der **SymBox** ausgelegt.
 
 ---
@@ -12,6 +17,7 @@ Das Modul ist für den stabilen Betrieb auf der **SymBox** ausgelegt.
 - IP-Symcon ab Version **6.x**
 - Projektor mit **PJLink Class 1** Unterstützung
 - Netzwerkverbindung zum Projektor
+- **Optional (nur Helligkeit):** Epson-Projektor mit aktivierter **Epson Web Control** (HTTP/HTTPS)
 
 ---
 
@@ -66,6 +72,27 @@ Nach dem Hinzufügen das Modul aktualisieren.
 - HDMI 2: 33
 - HDBaseT: 56
 
+### Helligkeit / Lichtleistung (Epson Web Control)
+
+| Eigenschaft | Beschreibung |
+|------------|--------------|
+| Lichtleistungs-Steuerung aktivieren | Schaltet die Helligkeits-Funktion frei (legt die Variablen an) |
+| Web-Control Benutzer | Benutzername der Epson Web Control (Standard: `EPSONWEB`) |
+| Web-Control Passwort | Passwort der Epson Web Control |
+| HTTPS statt HTTP verwenden | Zugriff über Port 443 statt 80 (selbstsigniertes Zertifikat wird akzeptiert) |
+
+### Automatische Anpassung an Raumhelligkeit
+
+| Eigenschaft | Beschreibung |
+|------------|--------------|
+| Auto-Helligkeit aktivieren | Aktiviert die automatische Regelung (legt den Laufzeit-Schalter an) |
+| Helligkeitssensor | Verknüpfte Variable mit dem Raumhelligkeitswert (z. B. KNX-Lux) |
+| Kennlinie (Lux → Pegel) | Tabelle von Stützpunkten; dazwischen wird linear interpoliert, außerhalb geklemmt |
+| Glättung | Trägheit des Sensorwerts (100 = keine Glättung, kleiner = träger) |
+| Totband | Minimale Pegeländerung, ab der überhaupt gestellt wird |
+| Mindestabstand | Kürzeste Zeit (Sek.) zwischen zwei Stellbefehlen |
+| Pause nach manueller Änderung | Minuten, für die die Automatik nach einer Handbedienung pausiert (0 = aus) |
+
 ---
 
 ## Variablen
@@ -82,6 +109,12 @@ Nach dem Hinzufügen das Modul aktualisieren.
 | LastError | String | Letzter Fehler |
 | LastOKTimestamp | Integer | Zeitstempel des letzten erfolgreichen Zugriffs |
 | ErrorCounter | Integer | Anzahl aufeinanderfolgender Fehler |
+| LightMode¹ | Integer | Lichtleistungs-Modus: Hoch / Eco / Mittel / Custom |
+| LightLevel¹ | Integer | Lichtleistungs-Pegel 0–250 (nur im Custom-Modus wirksam) |
+| AutoBrightness² | Boolean | Laufzeit-Schalter der automatischen Raumhelligkeits-Regelung |
+
+¹ nur wenn *Lichtleistungs-Steuerung* aktiviert ist  
+² nur wenn zusätzlich *Auto-Helligkeit* aktiviert ist
 
 ### Interne Variablen (versteckt)
 
@@ -102,6 +135,50 @@ Nach dem Hinzufügen das Modul aktualisieren.
 - Polling passt sich automatisch dem Betriebszustand an:
   - Schnell bei Übergängen
   - Langsam im stabilen Zustand
+
+---
+
+## Helligkeit / Lichtleistung (Epson Web Control)
+
+PJLink kennt keinen Helligkeitsbefehl. Für Epson-Modelle mit **Epson Web Control** steuert das Modul
+die Laser-Lichtleistung deshalb über deren HTTP-API:
+
+- **Lesen:** `GET /cgi-bin/json_query?jsoncallback=<CMD>`
+- **Schreiben:** `GET /cgi-bin/directsend?_OSD_<PARAM>=<wert>`
+- **Auth:** HTTP-Digest (`Web-Control Benutzer`/`Passwort`) mit Pflicht-`Referer` (CSRF-Schutz)
+
+Verwendete Kommandos: `LUMINANCE` (Modus `00`=Hoch, `01`=Eco, `02`=Mittel, `05`=Custom) und
+`LUMLEVEL` (numerischer Pegel `0–250`, nur im Custom-Modus wirksam). Beim Setzen eines Pegels wird
+automatisch in den Custom-Modus gewechselt.
+
+Der Status wird gedrosselt (höchstens alle 12 s, nur wenn der Projektor an ist) im normalen Poll
+mitgelesen und stört den PJLink-Betrieb nicht.
+
+### Steuerung per Skript
+
+| Funktion | Beschreibung |
+|----------|--------------|
+| `PJP_SetLightMode($id, $mode)` | Lichtleistungs-Modus setzen (`0`, `1`, `2`, `5`) |
+| `PJP_SetLightLevel($id, $level)` | Lichtleistungs-Pegel `0–250` setzen (aktiviert Custom-Modus) |
+
+> Aufrufe dieser Funktionen bzw. eine manuelle Änderung der Variablen gelten als **Handbedienung**
+> und pausieren die automatische Regelung für die konfigurierte Dauer.
+
+---
+
+## Automatische Raumhelligkeits-Regelung
+
+Ist ein Helligkeitssensor verknüpft und *Auto-Helligkeit* aktiv, passt das Modul den
+Lichtleistungs-Pegel automatisch an die gemessene Raumhelligkeit an:
+
+1. Der Sensorwert löst über **`VM_UPDATE`** direkt eine Neuberechnung aus (zusätzlich als Fallback im Poll).
+2. Der Wert wird per **gleitendem Mittelwert (EMA)** geglättet.
+3. Über die **Kennlinie** (Lux → Pegel, stückweise linear) wird der Ziel-Pegel bestimmt.
+4. **Totband** und **Rate-Limit** verhindern Zappeln und unnötige Stellbefehle.
+
+Geregelt wird nur, wenn der Projektor **an** ist und der Laufzeit-Schalter **AutoBrightness** aktiv ist.
+Eine **manuelle Änderung** (Slider oder Skript) pausiert die Automatik für die eingestellten Minuten;
+das erneute Einschalten von *AutoBrightness* hebt eine laufende Pause sofort auf.
 
 ---
 
