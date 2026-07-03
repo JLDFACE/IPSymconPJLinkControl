@@ -22,6 +22,21 @@ class PJLinkProjector extends IPSModule
         $this->RegisterPropertyInteger('Port', 4352);
         $this->RegisterPropertyString('Password', '');
 
+        // Epson Web Control (Helligkeit / Lichtleistung) - nur Epson-Modelle mit Web Control
+        $this->RegisterPropertyBoolean('EnableBrightness', false);
+        $this->RegisterPropertyString('WebUser', 'EPSONWEB');
+        $this->RegisterPropertyString('WebPassword', '');
+        $this->RegisterPropertyBoolean('WebHTTPS', false);
+
+        // Automatische Anpassung an Raumhelligkeit (KNX-Lux -> Lichtleistung)
+        $this->RegisterPropertyBoolean('AutoBrightnessEnable', false);
+        $this->RegisterPropertyInteger('AmbientVariableID', 0);
+        $this->RegisterPropertyString('AutoCurve', '[{"Lux":20,"Level":80},{"Lux":150,"Level":170},{"Lux":500,"Level":250}]');
+        $this->RegisterPropertyInteger('AutoSmoothPercent', 30);
+        $this->RegisterPropertyInteger('AutoDeadband', 5);
+        $this->RegisterPropertyInteger('AutoMinInterval', 15);
+        $this->RegisterPropertyInteger('AutoManualPauseMinutes', 30);
+
         // Input Codes Override (0 = Default je Vendor)
         $this->RegisterPropertyInteger('CodeHDMI1', 0);
         $this->RegisterPropertyInteger('CodeHDMI2', 0);
@@ -63,6 +78,58 @@ class PJLinkProjector extends IPSModule
 
         // Diagnose
         $this->RegisterVariableString('AvailableInputs', 'Verfügbare Inputs', '');
+
+        // Helligkeit / Lichtleistung (Epson Web Control) - nur wenn aktiviert
+        if ($this->ReadPropertyBoolean('EnableBrightness')) {
+            $this->RegisterVariableInteger('LightMode', 'Lichtleistung Modus', 'PJP.LightMode');
+            $this->EnableAction('LightMode');
+
+            $this->RegisterVariableInteger('LightLevel', 'Lichtleistung Pegel', 'PJP.LightLevel');
+            $this->EnableAction('LightLevel');
+
+            @IPS_SetIcon($this->GetIDForIdent('LightMode'), 'Sun');
+            @IPS_SetIcon($this->GetIDForIdent('LightLevel'), 'Intensity');
+
+            // Laufzeit-Schalter für die automatische Raumhelligkeits-Regelung
+            if ($this->ReadPropertyBoolean('AutoBrightnessEnable')) {
+                $abExisted = ((int)@$this->GetIDForIdent('AutoBrightness') > 0);
+                $this->RegisterVariableBoolean('AutoBrightness', 'Auto-Helligkeit', '~Switch');
+                $this->EnableAction('AutoBrightness');
+                @IPS_SetIcon($this->GetIDForIdent('AutoBrightness'), 'Sun');
+                if (!$abExisted) {
+                    $this->SetValue('AutoBrightness', true); // bei Erstanlage aktiv
+                }
+            } else {
+                $this->MaybeUnregister('AutoBrightness');
+            }
+        } else {
+            $this->MaybeUnregister('LightMode');
+            $this->MaybeUnregister('LightLevel');
+            $this->MaybeUnregister('AutoBrightness');
+        }
+
+        // Interner Merker: Automatik pausiert bis (Unix-TS) nach manueller Änderung
+        $this->RegisterVariableInteger('__AutoPausedUntil', '__Auto Paused Until', '');
+        IPS_SetHidden($this->GetIDForIdent('__AutoPausedUntil'), true);
+
+        // Nachrichten-Registrierung für den Helligkeitssensor (VM_UPDATE) neu aufsetzen
+        foreach ($this->GetMessageList() as $senderID => $messages) {
+            foreach ($messages as $msg) {
+                if ($msg == VM_UPDATE) {
+                    $this->UnregisterMessage($senderID, VM_UPDATE);
+                }
+            }
+        }
+        foreach ($this->GetReferenceList() as $refID) {
+            $this->UnregisterReference($refID);
+        }
+        $ambID = (int)$this->ReadPropertyInteger('AmbientVariableID');
+        if ($this->ReadPropertyBoolean('EnableBrightness')
+            && $this->ReadPropertyBoolean('AutoBrightnessEnable')
+            && $ambID > 0 && @IPS_VariableExists($ambID)) {
+            $this->RegisterReference($ambID);
+            $this->RegisterMessage($ambID, VM_UPDATE);
+        }
 
         // Online/Diagnose
         $this->RegisterVariableBoolean('Online', 'Projektor Online', '');
@@ -119,6 +186,26 @@ class PJLinkProjector extends IPSModule
 
         if ($Ident === 'Input') {
             $this->HandleInputAction((int)$Value);
+            return;
+        }
+
+        if ($Ident === 'LightMode') {
+            $this->SetLightMode((int)$Value);
+            return;
+        }
+
+        if ($Ident === 'LightLevel') {
+            $this->SetLightLevel((int)$Value);
+            return;
+        }
+
+        if ($Ident === 'AutoBrightness') {
+            $this->SetValue('AutoBrightness', (bool)$Value);
+            if ((bool)$Value) {
+                // Beim Einschalten sofort regeln und evtl. laufende Pause aufheben
+                $this->SetValue('__AutoPausedUntil', 0);
+                $this->AutoRegulate();
+            }
             return;
         }
 
@@ -436,6 +523,10 @@ class PJLinkProjector extends IPSModule
         if ($ok === false) {
             $this->SetPollInterval($this->ReadPropertyInteger('PollFast'));
         }
+
+        // Helligkeit/Lichtleistung getrennt aktualisieren (eigener Kanal, darf Poll nie stören)
+        $this->PollLight();
+        $this->AutoRegulate();
     }
 
     public function RefreshAvailableInputs()
@@ -691,6 +782,24 @@ class PJLinkProjector extends IPSModule
             IPS_SetVariableProfileIcon('PJP.UnixTimestamp', 'Clock');
             IPS_SetVariableProfileText('PJP.UnixTimestamp', '', '');
         }
+
+        // Lichtleistungs-Modus (Epson LUMINANCE): 0/1/2 = Presets, 5 = Custom
+        if (!IPS_VariableProfileExists('PJP.LightMode')) {
+            IPS_CreateVariableProfile('PJP.LightMode', VARIABLETYPE_INTEGER);
+            IPS_SetVariableProfileIcon('PJP.LightMode', 'Sun');
+        }
+        IPS_SetVariableProfileAssociation('PJP.LightMode', 0, 'Hoch (Normal)', '', 0);
+        IPS_SetVariableProfileAssociation('PJP.LightMode', 1, 'Eco', '', 0);
+        IPS_SetVariableProfileAssociation('PJP.LightMode', 2, 'Mittel', '', 0);
+        IPS_SetVariableProfileAssociation('PJP.LightMode', 5, 'Custom', '', 0);
+
+        // Lichtleistungs-Pegel (Epson LUMLEVEL) 0..250 als Slider
+        if (!IPS_VariableProfileExists('PJP.LightLevel')) {
+            IPS_CreateVariableProfile('PJP.LightLevel', VARIABLETYPE_INTEGER);
+            IPS_SetVariableProfileIcon('PJP.LightLevel', 'Intensity');
+            IPS_SetVariableProfileText('PJP.LightLevel', '', '');
+        }
+        IPS_SetVariableProfileValues('PJP.LightLevel', 0, 250, 1);
     }
 
     // ---------- Input Mapping ----------
@@ -847,5 +956,282 @@ class PJLinkProjector extends IPSModule
         }
 
         return true;
+    }
+
+    // ---------- Epson Web Control: Helligkeit / Lichtleistung ----------
+    // Öffentliche Methoden -> per PJP_SetLightMode($id, $mode) / PJP_SetLightLevel($id, $level) aufrufbar
+
+    // Öffentliche Setter = "manuelle" Bedienung -> pausieren ggf. die Automatik
+    public function SetLightMode($mode)
+    {
+        if (!$this->ReadPropertyBoolean('EnableBrightness')) {
+            $this->LogMessage('Helligkeitssteuerung ist deaktiviert.', KL_WARNING);
+            return;
+        }
+        $this->MarkManualOverride();
+        $this->ApplyLightMode((int)$mode);
+    }
+
+    public function SetLightLevel($level)
+    {
+        if (!$this->ReadPropertyBoolean('EnableBrightness')) {
+            $this->LogMessage('Helligkeitssteuerung ist deaktiviert.', KL_WARNING);
+            return;
+        }
+        $this->MarkManualOverride();
+        $this->ApplyLightLevel((int)$level);
+    }
+
+    private function ApplyLightMode($mode)
+    {
+        $mode = (int)$mode;
+        if (!in_array($mode, [0, 1, 2, 5], true)) {
+            $this->LogMessage('Ungültiger Lichtleistungs-Modus: ' . $mode, KL_WARNING);
+            return;
+        }
+        try {
+            $this->EpsonWebSet('_OSD_LUMINANCE=' . sprintf('%02d', $mode));
+            $this->SetValue('LightMode', $mode);
+        } catch (Exception $e) {
+            $this->HandleImmediateCommandError('LUMINANCE set', $e);
+        }
+    }
+
+    private function ApplyLightLevel($level)
+    {
+        $level = (int)$level;
+        if ($level < 0)   $level = 0;
+        if ($level > 250) $level = 250;
+        try {
+            // Der numerische Pegel wirkt nur im Custom-Modus (05) -> ggf. automatisch aktivieren
+            if ((int)$this->GetValue('LightMode') !== 5) {
+                $this->EpsonWebSet('_OSD_LUMINANCE=05');
+                $this->SetValue('LightMode', 5);
+            }
+            $this->EpsonWebSet('_OSD_LUMLEVEL=' . $level);
+            $this->SetValue('LightLevel', $level);
+        } catch (Exception $e) {
+            $this->HandleImmediateCommandError('LUMLEVEL set', $e);
+        }
+    }
+
+    // ---------- Automatische Raumhelligkeits-Regelung ----------
+    // Wird durch VM_UPDATE des Sensors (MessageSink) und als Fallback im Poll ausgelöst.
+    public function MessageSink($TimeStamp, $SenderID, $Message, $Data)
+    {
+        if ($Message == VM_UPDATE
+            && (int)$SenderID === (int)$this->ReadPropertyInteger('AmbientVariableID')) {
+            $this->AutoRegulate();
+        }
+    }
+
+    private function MarkManualOverride()
+    {
+        if (!$this->ReadPropertyBoolean('AutoBrightnessEnable')) return;
+        $min = (int)$this->ReadPropertyInteger('AutoManualPauseMinutes');
+        if ($min > 0 && @$this->GetIDForIdent('__AutoPausedUntil')) {
+            $this->SetValue('__AutoPausedUntil', time() + $min * 60);
+        }
+    }
+
+    private function AutoRegulate()
+    {
+        if (!$this->ReadPropertyBoolean('EnableBrightness')) return;
+        if (!$this->ReadPropertyBoolean('AutoBrightnessEnable')) return;
+
+        // Laufzeit-Schalter
+        if (@$this->GetIDForIdent('AutoBrightness') && !$this->GetValue('AutoBrightness')) return;
+
+        // Pause nach manueller Änderung
+        if (@$this->GetIDForIdent('__AutoPausedUntil')
+            && time() < (int)$this->GetValue('__AutoPausedUntil')) return;
+
+        // Nur regeln wenn Projektor an ist
+        if ((int)$this->GetValue('PowerState') !== 1) return;
+
+        $ambID = (int)$this->ReadPropertyInteger('AmbientVariableID');
+        if ($ambID <= 0 || !@IPS_VariableExists($ambID)) return;
+
+        $lux = (float)@GetValue($ambID);
+        if ($lux < 0) $lux = 0.0;
+
+        // Glättung (exponentieller gleitender Mittelwert)
+        $alpha = (int)$this->ReadPropertyInteger('AutoSmoothPercent');
+        if ($alpha < 1)   $alpha = 1;
+        if ($alpha > 100) $alpha = 100;
+        $a    = $alpha / 100.0;
+        $prev = $this->GetBuffer('AutoLuxEMA');
+        $ema  = ($prev === '') ? $lux : ($a * $lux + (1 - $a) * (float)$prev);
+        $this->SetBuffer('AutoLuxEMA', (string)$ema);
+
+        $target = $this->InterpolateCurve($ema);
+        if ($target === null) return;
+        $target = (int)round($target);
+        if ($target < 0)   $target = 0;
+        if ($target > 250) $target = 250;
+
+        // Totband gegen aktuellen Pegel
+        $cur = (int)$this->GetValue('LightLevel');
+        $db  = (int)$this->ReadPropertyInteger('AutoDeadband');
+        if (abs($target - $cur) < max(1, $db)) return;
+
+        // Rate-Limit zwischen Stellbefehlen
+        $now    = time();
+        $lastTs = (int)$this->GetBuffer('AutoLastSetTS');
+        $minIv  = (int)$this->ReadPropertyInteger('AutoMinInterval');
+        if ($lastTs > 0 && ($now - $lastTs) < max(1, $minIv)) return;
+        $this->SetBuffer('AutoLastSetTS', (string)$now);
+
+        try {
+            $this->ApplyLightLevel($target); // ohne MarkManualOverride -> keine Selbst-Pause
+        } catch (Exception $e) {
+            $this->LogMessage('Auto-Regelung fehlgeschlagen: ' . $e->getMessage(), KL_DEBUG);
+        }
+    }
+
+    // Stückweise lineare Interpolation über die konfigurierten Lux/Pegel-Stützpunkte
+    private function InterpolateCurve($lux)
+    {
+        $raw = json_decode((string)$this->ReadPropertyString('AutoCurve'), true);
+        if (!is_array($raw) || count($raw) === 0) return null;
+
+        $pts = [];
+        foreach ($raw as $p) {
+            if (!isset($p['Lux']) || !isset($p['Level'])) continue;
+            $pts[] = ['lux' => (float)$p['Lux'], 'lvl' => (float)$p['Level']];
+        }
+        if (count($pts) === 0) return null;
+
+        usort($pts, function ($x, $y) {
+            return $x['lux'] <=> $y['lux'];
+        });
+
+        $n = count($pts);
+        if ($lux <= $pts[0]['lux'])      return $pts[0]['lvl'];
+        if ($lux >= $pts[$n - 1]['lux']) return $pts[$n - 1]['lvl'];
+
+        for ($i = 0; $i < $n - 1; $i++) {
+            $lo = $pts[$i];
+            $hi = $pts[$i + 1];
+            if ($lux >= $lo['lux'] && $lux <= $hi['lux']) {
+                $span = $hi['lux'] - $lo['lux'];
+                if ($span <= 0) return $lo['lvl'];
+                $t = ($lux - $lo['lux']) / $span;
+                return $lo['lvl'] + $t * ($hi['lvl'] - $lo['lvl']);
+            }
+        }
+        return $pts[$n - 1]['lvl'];
+    }
+
+    // Liest Modus + Pegel aus der Web Control und aktualisiert die Variablen.
+    // Darf den normalen PJLink-Betrieb niemals stören (eigenes try/catch, gedrosselt).
+    private function PollLight()
+    {
+        if (!$this->ReadPropertyBoolean('EnableBrightness')) return;
+
+        // Nur wenn Projektor an ist
+        if ((int)$this->GetValue('PowerState') !== 1) return;
+
+        // Drosselung: höchstens alle 12s abfragen (unabhängig vom Poll-Takt)
+        $now  = time();
+        $last = (int)$this->GetBuffer('LightPollTS');
+        if ($last > 0 && ($now - $last) < 12) return;
+        $this->SetBuffer('LightPollTS', (string)$now);
+
+        try {
+            $mode = $this->EpsonWebGet('LUMINANCE?');
+            if ($mode !== null && $mode !== 'ERR' && preg_match('/^\d+$/', $mode)) {
+                $this->SetValueIfChanged('LightMode', (int)$mode);
+            }
+            $lvl = $this->EpsonWebGet('LUMLEVEL?');
+            if ($lvl !== null && $lvl !== 'ERR' && preg_match('/^\d+$/', $lvl)) {
+                $this->SetValueIfChanged('LightLevel', (int)$lvl);
+            }
+        } catch (Exception $e) {
+            $this->LogMessage('Light-Poll fehlgeschlagen: ' . $e->getMessage(), KL_DEBUG);
+        }
+    }
+
+    private function SetValueIfChanged($ident, $value)
+    {
+        if ($this->GetValue($ident) !== $value) {
+            $this->SetValue($ident, $value);
+        }
+    }
+
+    // ---------- Epson Web Control HTTP Low-Level ----------
+    private function EpsonWebGet($cmd)
+    {
+        $body = $this->EpsonWebRequest('/cgi-bin/json_query', 'jsoncallback=' . rawurlencode($cmd));
+        $j = @json_decode($body, true);
+        if (is_array($j) && isset($j['projector']['feature'])) {
+            $f = $j['projector']['feature'];
+            if (!empty($f['error'])) return 'ERR';
+            return isset($f['reply']) ? (string)$f['reply'] : null;
+        }
+        return null;
+    }
+
+    private function EpsonWebSet($param)
+    {
+        $eq = strpos($param, '=');
+        if ($eq === false) {
+            $query = rawurlencode($param);
+        } else {
+            $query = rawurlencode(substr($param, 0, $eq)) . '=' . rawurlencode(substr($param, $eq + 1));
+        }
+        $this->EpsonWebRequest('/cgi-bin/directsend', $query);
+        return true;
+    }
+
+    private function EpsonWebRequest($path, $query)
+    {
+        $host = trim($this->ReadPropertyString('Host'));
+        if ($host === '') throw new Exception('Host ist leer.');
+
+        $https  = (bool)$this->ReadPropertyBoolean('WebHTTPS');
+        $base   = ($https ? 'https' : 'http') . '://' . $host;
+        $url    = $base . $path . ($query !== '' ? ('?' . $query) : '');
+
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 3);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+        curl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
+        curl_setopt($ch, CURLOPT_USERPWD, $this->ReadPropertyString('WebUser') . ':' . $this->ReadPropertyString('WebPassword'));
+        // CSRF-Schutz der Epson Web Control verlangt einen gültigen Referer
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Referer: ' . $base . '/cgi-bin/webconf']);
+        if ($https) {
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+        }
+
+        $body = curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err  = curl_error($ch);
+        curl_close($ch);
+
+        if ($body === false) {
+            throw new Exception('Epson Web Control HTTP-Fehler: ' . $err);
+        }
+        if ($code === 401) {
+            throw new Exception('Epson Web Control Auth fehlgeschlagen (WebUser/WebPassword prüfen).');
+        }
+        if ($code === 403) {
+            throw new Exception('Epson Web Control 403 (Referer/CSRF).');
+        }
+        if ($code < 200 || $code >= 300) {
+            throw new Exception('Epson Web Control HTTP ' . $code);
+        }
+        return (string)$body;
+    }
+
+    private function MaybeUnregister($ident)
+    {
+        $id = @$this->GetIDForIdent($ident);
+        if ($id) {
+            $this->UnregisterVariable($ident);
+        }
     }
 }

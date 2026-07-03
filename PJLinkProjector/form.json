@@ -24,7 +24,34 @@
     { "type": "NumberSpinner", "name": "PollSlow", "caption": "Polling langsam (Sek.)", "minimum": 5, "maximum": 600 },
 
     { "type": "NumberSpinner", "name": "FastAfterChange", "caption": "Nach Statusänderung schnell pollen (Sek.)", "minimum": 0, "maximum": 300 },
-    { "type": "NumberSpinner", "name": "ErrorLogCooldown", "caption": "Fehler-Log Drosselung (Sek., 0 = aus)", "minimum": 0, "maximum": 3600 }
+    { "type": "NumberSpinner", "name": "ErrorLogCooldown", "caption": "Fehler-Log Drosselung (Sek., 0 = aus)", "minimum": 0, "maximum": 3600 },
+
+    { "type": "Label", "caption": "Helligkeit / Lichtleistung über Epson Web Control (nur Epson-Modelle mit aktivierter Web-API):" },
+    { "type": "CheckBox", "name": "EnableBrightness", "caption": "Lichtleistungs-Steuerung aktivieren" },
+    { "type": "ValidationTextBox", "name": "WebUser", "caption": "Web-Control Benutzer (Standard: EPSONWEB)" },
+    { "type": "PasswordTextBox", "name": "WebPassword", "caption": "Web-Control Passwort" },
+    { "type": "CheckBox", "name": "WebHTTPS", "caption": "HTTPS statt HTTP verwenden" },
+
+    { "type": "Label", "caption": "Automatische Anpassung an Raumhelligkeit (benötigt aktivierte Lichtleistungs-Steuerung):" },
+    { "type": "CheckBox", "name": "AutoBrightnessEnable", "caption": "Auto-Helligkeit aktivieren" },
+    { "type": "SelectVariable", "name": "AmbientVariableID", "caption": "Helligkeitssensor (KNX Lux-Wert)" },
+    {
+      "type": "List",
+      "name": "AutoCurve",
+      "caption": "Kennlinie: Lux → Lichtleistungs-Pegel (0–250)",
+      "rowCount": 5,
+      "add": true,
+      "delete": true,
+      "sort": { "column": "Lux", "direction": "ascending" },
+      "columns": [
+        { "caption": "Lux",   "name": "Lux",   "width": "150px", "add": 100, "edit": { "type": "NumberSpinner", "minimum": 0, "maximum": 100000 } },
+        { "caption": "Pegel", "name": "Level", "width": "150px", "add": 150, "edit": { "type": "NumberSpinner", "minimum": 0, "maximum": 250 } }
+      ]
+    },
+    { "type": "NumberSpinner", "name": "AutoSmoothPercent", "caption": "Glättung (100 = keine, kleiner = träger)", "minimum": 1, "maximum": 100 },
+    { "type": "NumberSpinner", "name": "AutoDeadband", "caption": "Totband (min. Pegeländerung)", "minimum": 1, "maximum": 100 },
+    { "type": "NumberSpinner", "name": "AutoMinInterval", "caption": "Mindestabstand zwischen Stellbefehlen (Sek.)", "minimum": 1, "maximum": 600 },
+    { "type": "NumberSpinner", "name": "AutoManualPauseMinutes", "caption": "Pause nach manueller Änderung (Min., 0 = aus)", "minimum": 0, "maximum": 480 }
   ],
   "actions": [
     { "type": "Button", "caption": "Jetzt Status aktualisieren", "onClick": "PJP_Poll($id);" }
