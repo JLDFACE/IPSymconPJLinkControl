@@ -396,20 +396,28 @@ class PJLinkProjector extends IPSModule
                     $wantLogicalInput = 0;
                 }
 
-                // Delay-Start nur bei echtem Power-On (0 -> !=0)
+                // Delay-Start bei echtem Power-On: Eintritt in An/Warmup aus Aus (0) oder Cool-down (2)
                 $last = (int)$self->GetValue('__LastPwr');
-                if ($last === 0 && $pwrState !== 0) {
+                if (($last === 0 || $last === 2) && ($pwrState === 1 || $pwrState === 3)) {
                     $self->SetValue('__PowerOnTS', time());
                 }
 
-                // Manuelle Einschaltung erkennen:
-                // Aus (0) -> Warmup (3) oder An (1) obwohl __CmdPower noch false
-                // => externe Einschaltung, Sollwert übernehmen (sonst würde ApplyLogic
-                //    den Projektor sofort wieder ausschalten)
-                if ($last === 0 && ($pwrState === 1 || $pwrState === 3) && !(bool)$self->GetValue('__CmdPower')) {
-                    $self->SetValue('__CmdPower', true);
-                    $self->SetValue('Power', true);
-                    $self->LogMessage('Manuelle Einschaltung am Gerät erkannt – Sollwert auf EIN gesetzt.', KL_NOTIFY);
+                // Externe Einschaltung erkennen (CEC/Fernbedienung) und Sollwert übernehmen,
+                // sonst würde ApplyLogic den Projektor sofort wieder ausschalten.
+                //   - Warm-up (3) ist IMMER ein Einschaltvorgang – Ausschalten läuft über Cool-down (2),
+                //     nie über Warm-up. Daher unabhängig vom Vorzustand als externe Einschaltung werten.
+                //     (Fix: früher nur $last===0, wodurch ein CEC-Einschalten aus dem Cool-down heraus
+                //      verpasst und der Projektor sofort wieder ausgeschaltet wurde.)
+                //   - An (1) nur übernehmen, wenn er aus Aus/Warm-up hochkam ($last 0 oder 3);
+                //     ein lingerndes "An" direkt nach eigenem Aus-Befehl darf NICHT reaktivieren.
+                if (!(bool)$self->GetValue('__CmdPower')) {
+                    $externalOn = ($pwrState === 3)
+                        || ($pwrState === 1 && ($last === 0 || $last === 3));
+                    if ($externalOn) {
+                        $self->SetValue('__CmdPower', true);
+                        $self->SetValue('Power', true);
+                        $self->LogMessage('Externe Einschaltung erkannt (CEC/Fernbedienung) – Sollwert auf EIN gesetzt.', KL_NOTIFY);
+                    }
                 }
 
                 // Manuelle Abschaltung erkennen (mit Cooldown):
@@ -602,6 +610,9 @@ class PJLinkProjector extends IPSModule
             if ((int)$pwrState === 0) {
                 return;
             }
+            // Diagnose: macht ein Modul-seitiges Ausschalten im Meldungslog eindeutig sichtbar
+            // (unterscheidbar von einem Aus über eine externe Automation/Kopplung).
+            $this->LogMessage('ApplyLogic: Soll=Aus – sende POWR 0 (PowerState=' . (int)$pwrState . ').', KL_NOTIFY);
             $this->PJLinkSetPower($ip, (int)$port, $pw, 0, (int)$timeout);
             $this->SetPollInterval($this->ReadPropertyInteger('PollFast'));
             return;
