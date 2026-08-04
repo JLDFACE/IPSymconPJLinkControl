@@ -1005,6 +1005,7 @@ class PJLinkProjector extends IPSModule
             $this->LogMessage('Helligkeitssteuerung ist deaktiviert.', KL_WARNING);
             return;
         }
+        if (!$this->IsPoweredOn()) return;   // bei Aus/Warm-/Cool-down nicht an den Projektor senden
         $this->MarkManualOverride();
         $this->ApplyLightMode((int)$mode);
         $this->RefreshLightNow(); // Modus + zugehörigen Pegel sofort aus dem Gerät nachziehen
@@ -1016,9 +1017,21 @@ class PJLinkProjector extends IPSModule
             $this->LogMessage('Helligkeitssteuerung ist deaktiviert.', KL_WARNING);
             return;
         }
+        if (!$this->IsPoweredOn()) return;   // bei Aus/Warm-/Cool-down nicht an den Projektor senden
         $this->MarkManualOverride();
         $this->ApplyLightLevel((int)$level);
         $this->RefreshLightNow();
+    }
+
+    // True nur, wenn der Projektor voll eingeschaltet ist (PowerState 1 = An).
+    // Bei Aus (0), Cool-down (2) oder Warm-up (3) werden manuelle Helligkeits-/Modus-
+    // Befehle ignoriert (kein Epson-Web-Befehl im Standby).
+    private function IsPoweredOn()
+    {
+        if ((int)$this->GetValue('PowerState') === 1) return true;
+        $this->LogMessage('Helligkeit/Modus bei ausgeschaltetem Projektor ignoriert (PowerState='
+            . (int)$this->GetValue('PowerState') . ').', KL_NOTIFY);
+        return false;
     }
 
     private function ApplyLightMode($mode)
