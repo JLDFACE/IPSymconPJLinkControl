@@ -48,6 +48,10 @@ class PJLinkProjector extends IPSModule
         $this->RegisterPropertyInteger('PollFast', 2);
         $this->RegisterPropertyInteger('PollSlow', 15);
 
+        // Dauerausfall: Poll-Takt gestaffelt bis auf diesen Wert strecken (Sek., 0 = aus)
+        // Ohne das pollt das Modul einen abgehängten Projektor tagelang im PollFast-Takt.
+        $this->RegisterPropertyInteger('PollOfflineMax', 300);
+
         // Nach Statusänderung noch X Sekunden schnell pollen
         $this->RegisterPropertyInteger('FastAfterChange', 30);
 
@@ -238,6 +242,9 @@ class PJLinkProjector extends IPSModule
             return;
         }
 
+        $altCmd   = (bool)$this->GetValue('__CmdPower');
+        $altPower = (bool)$this->GetValue('Power');
+
         $this->SetValue('__CmdPower', (bool)$wantOn);
         $this->SetValue('Power', (bool)$wantOn);
 
@@ -245,7 +252,15 @@ class PJLinkProjector extends IPSModule
         $this->SetPollInterval($this->ReadPropertyInteger('PollFast'));
 
         // Befehl SOFORT senden (nicht erst beim nächsten Poll warten)
-        $this->SendPowerCommandNow($wantOn);
+        if (!$this->SendPowerCommandNow($wantOn)) {
+            // Projektor nicht erreichbar: Sollwert zurücknehmen. Sonst steht in der Visu
+            // (und für gekoppelte Automationen) ein Zustand, den das Gerät nie erhalten hat.
+            $this->SetValue('__CmdPower', $altCmd);
+            $this->SetValue('Power', $altPower);
+            $this->LogWarningThrottled('Power-Befehl nicht zugestellt (Projektor nicht erreichbar) – Sollwert zurückgenommen.');
+            $this->SetPollInterval($this->OfflineBackoffInterval());
+            return;
+        }
 
         $this->Poll();
     }
@@ -265,6 +280,14 @@ class PJLinkProjector extends IPSModule
             $prevDeviceInput = $this->MapInputToDevice($prevLogical);
         }
 
+        // Zustand für den Rückzieher, falls der Befehl nicht zugestellt werden kann
+        $altCmdInput     = (int)$this->GetValue('__CmdInput');
+        $altCmdLogical   = (int)$this->GetValue('__CmdInputLogical');
+        $altCmdPrevDev   = (int)$this->GetValue('__CmdInputPrevDevice');
+        $altInput        = (int)$this->GetValue('Input');
+        $altCmdPower     = (bool)$this->GetValue('__CmdPower');
+        $altPower        = (bool)$this->GetValue('Power');
+
         // Soll-Input speichern (Device + Logical)
         $this->SetValue('__CmdInput', $deviceCode);
         $this->SetValue('__CmdInputLogical', $logical);
@@ -283,16 +306,30 @@ class PJLinkProjector extends IPSModule
         $this->SetPollInterval($this->ReadPropertyInteger('PollFast'));
 
         // Befehle SOFORT senden (nicht erst beim nächsten Poll warten)
-        $this->SendInputCommandNow($deviceCode);
+        if (!$this->SendInputCommandNow($deviceCode)) {
+            $this->SetValue('__CmdInput', $altCmdInput);
+            $this->SetValue('__CmdInputLogical', $altCmdLogical);
+            $this->SetValue('__CmdInputPrevDevice', $altCmdPrevDev);
+            $this->SetValue('Input', $altInput);
+            $this->SetValue('__CmdPower', $altCmdPower);
+            $this->SetValue('Power', $altPower);
+            $this->LogWarningThrottled('Quellen-Befehl nicht zugestellt (Projektor nicht erreichbar) – Sollwert zurückgenommen.');
+            $this->SetPollInterval($this->OfflineBackoffInterval());
+            return;
+        }
 
         $this->Poll();
     }
 
     // ---------- Sofort-Befehle (ohne Poll-Verzögerung) ----------
+    // Rückgabe: true = Befehl ist beim Projektor gelandet (oder wird bewusst später
+    // gesendet), false = Gerät nicht erreichbar. Der Aufrufer nimmt dann den Sollwert
+    // zurück, damit Visu und Kopplungen keinen Zustand anzeigen, den es nie gab.
     private function SendPowerCommandNow($wantOn)
     {
         $self = $this;
-        $this->WithLock('poll', function () use ($self, $wantOn) {
+        $erfolg = false;
+        $gelaufen = $this->WithLock('poll', function () use ($self, $wantOn, &$erfolg) {
             try {
                 $host = trim($self->ReadPropertyString('Host'));
                 if ($host === '') return;
@@ -302,16 +339,25 @@ class PJLinkProjector extends IPSModule
                 $timeout = 2;
 
                 $self->PJLinkSetPower($host, $port, $pw, $wantOn ? 1 : 0, $timeout);
+                $erfolg = true;
             } catch (Exception $e) {
                 $self->HandleImmediateCommandError('Sofort-Power-Befehl', $e);
+                // Protokollfehler = das Gerät hat geantwortet, der Sollwert darf stehen
+                // bleiben und der Poll gleicht ab. Nur ein Verbindungsfehler heißt
+                // "nicht zugestellt".
+                $erfolg = !$self->IsTransientPJLinkError($e->getMessage());
             }
         });
+
+        // Semaphore belegt: der Poll übernimmt den Sollwert gleich selbst -> kein Fehlschlag
+        return $erfolg || ($gelaufen === false);
     }
 
     private function SendInputCommandNow($deviceCode)
     {
         $self = $this;
-        $this->WithLock('poll', function () use ($self, $deviceCode) {
+        $erfolg = false;
+        $gelaufen = $this->WithLock('poll', function () use ($self, $deviceCode, &$erfolg) {
             try {
                 $host = trim($self->ReadPropertyString('Host'));
                 if ($host === '') return;
@@ -327,11 +373,13 @@ class PJLinkProjector extends IPSModule
                 if ($pwrState === 0) {
                     $self->PJLinkSetPower($host, $port, $pw, 1, $timeout);
                     // Input wird beim nächsten Poll gesetzt (nach Warmup)
+                    $erfolg = true;
                     return;
                 }
 
                 // Wenn Warmup: Input wird automatisch beim nächsten Poll gesetzt
                 if ($pwrState === 3) {
+                    $erfolg = true;
                     return;
                 }
 
@@ -347,10 +395,14 @@ class PJLinkProjector extends IPSModule
                     }
                     // Sonst wartet ApplyLogic beim nächsten Poll
                 }
+                $erfolg = true;
             } catch (Exception $e) {
                 $self->HandleImmediateCommandError('Sofort-Input-Befehl', $e);
+                $erfolg = !$self->IsTransientPJLinkError($e->getMessage());
             }
         });
+
+        return $erfolg || ($gelaufen === false);
     }
 
     // ---------- Polling / Main ----------
@@ -550,7 +602,7 @@ class PJLinkProjector extends IPSModule
                 }
 
                 $self->SetOnlineError($e->getMessage());
-                $self->SetPollInterval($self->ReadPropertyInteger('PollFast'));
+                $self->SetPollInterval($self->OfflineBackoffInterval());
             }
         });
 
@@ -684,7 +736,7 @@ class PJLinkProjector extends IPSModule
         $lastChange = (int)$this->GetValue('__LastChangeTS');
 
         if (!$online) {
-            $this->SetPollInterval($this->ReadPropertyInteger('PollFast'));
+            $this->SetPollInterval($this->OfflineBackoffInterval());
             return;
         }
 
@@ -701,12 +753,51 @@ class PJLinkProjector extends IPSModule
         $this->SetPollInterval($this->ReadPropertyInteger('PollSlow'));
     }
 
+    // Bei dauerhaftem Ausfall den Poll-Takt strecken: eine abgezogene Netzwerkleitung
+    // wird durch Pollen im 2-Sekunden-Takt nicht besser, füllt aber Meldungslog und
+    // ErrorCounter. Kurze Störungen sollen trotzdem schnell überbrückt werden.
+    private function OfflineBackoffInterval()
+    {
+        $fast = max(1, (int)$this->ReadPropertyInteger('PollFast'));
+        $max  = (int)$this->ReadPropertyInteger('PollOfflineMax');
+        if ($max <= $fast) {
+            return $fast; // Backoff abgeschaltet oder sinnlos konfiguriert
+        }
+
+        $seit = (int)$this->GetBuffer('OfflineSince');
+        if ($seit <= 0) {
+            $seit = (int)$this->GetValue('LastOKTimestamp');
+        }
+        if ($seit <= 0) {
+            return $fast; // noch nie Kontakt gehabt -> normal weiterprobieren
+        }
+
+        $weg = time() - $seit;
+        if ($weg < 60) {
+            return $fast;              // kurze Störung / Neustart des Projektors
+        }
+        if ($weg < 300) {
+            return min($max, 15);
+        }
+        if ($weg < 1800) {
+            return min($max, 60);
+        }
+        return $max;                   // dauerhaft weg -> nur noch selten anklopfen
+    }
+
     private function SetOnlineOk()
     {
         if (!(bool)$this->GetValue('Online')) {
+            $seit = (int)$this->GetBuffer('OfflineSince');
+            $dauer = ($seit > 0) ? ' (war ' . $this->FormatDauer(time() - $seit) . ' weg)' : '';
+            $this->LogMessage('Projektor wieder erreichbar' . $dauer . '.', KL_NOTIFY);
+
             $this->SetValue('Online', true);
             $this->SetBuffer('WarnMsg', '');
             $this->SetBuffer('WarnTs', '0');
+            $this->SetBuffer('OfflineSince', '0');
+            $this->SetBuffer('ErrCnt', '0');
+            $this->SetBuffer('ErrCntTs', '0');
         }
 
         if ((int)$this->GetValue('ErrorCounter') !== 0) {
@@ -722,17 +813,53 @@ class PJLinkProjector extends IPSModule
 
     private function SetOnlineError($message)
     {
-        $this->SetValue('Online', false);
-        $this->SetValue('Busy', false);
-
-        $cnt = (int)$this->GetValue('ErrorCounter');
-        $cnt++;
-        $this->SetValue('ErrorCounter', $cnt);
-
         $msg = (string)$message;
+        $warOnline = (bool)$this->GetValue('Online');
+
+        if ($warOnline) {
+            // Genau ein Eintrag beim Wegbrechen – vorher stand im Meldungslog gar nichts,
+            // dadurch fiel ein tagelanger Ausfall niemandem auf.
+            $this->LogMessage('Projektor nicht mehr erreichbar: ' . $msg, KL_WARNING);
+            $this->SetValue('Online', false);
+            $this->SetBuffer('OfflineSince', (string)time());
+            $this->SetBuffer('ErrCnt', (string)(int)$this->GetValue('ErrorCounter'));
+            $this->SetBuffer('ErrCntTs', '0');
+        }
+
+        if ((bool)$this->GetValue('Busy')) {
+            $this->SetValue('Busy', false);
+        }
+
+        // Zähler im Buffer mitführen und nur gedrosselt in die Variable schreiben.
+        // Jeder Schreibvorgang landet sonst als eigene Zeile im Meldungslog.
+        $cnt = (int)$this->GetBuffer('ErrCnt') + 1;
+        $this->SetBuffer('ErrCnt', (string)$cnt);
+
+        $takt = max(60, (int)$this->ReadPropertyInteger('ErrorLogCooldown'));
+        $letzte = (int)$this->GetBuffer('ErrCntTs');
+        if ($letzte === 0 || (time() - $letzte) >= $takt) {
+            $this->SetValue('ErrorCounter', $cnt);
+            $this->SetBuffer('ErrCntTs', (string)time());
+        }
+
         if ((string)$this->GetValue('LastError') !== $msg) {
             $this->SetValue('LastError', $msg);
         }
+    }
+
+    private function FormatDauer($sekunden)
+    {
+        $s = max(0, (int)$sekunden);
+        if ($s < 60) {
+            return $s . ' s';
+        }
+        if ($s < 3600) {
+            return floor($s / 60) . ' min';
+        }
+        if ($s < 86400) {
+            return floor($s / 3600) . ' h';
+        }
+        return floor($s / 86400) . ' Tage';
     }
 
     private function LogWarningThrottled($message)
