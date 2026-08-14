@@ -788,7 +788,12 @@ class PJLinkProjector extends IPSModule
     private function SetOnlineOk()
     {
         if (!(bool)$this->GetValue('Online')) {
+            // Buffer ist nach einem Modul-Neuladen leer -> auf den letzten Kontakt zurückfallen,
+            // sonst fehlt genau bei langen Ausfällen die Dauer in der Meldung.
             $seit = (int)$this->GetBuffer('OfflineSince');
+            if ($seit <= 0) {
+                $seit = (int)$this->GetValue('LastOKTimestamp');
+            }
             $dauer = ($seit > 0) ? ' (war ' . $this->FormatDauer(time() - $seit) . ' weg)' : '';
             $this->LogMessage('Projektor wieder erreichbar' . $dauer . '.', KL_NOTIFY);
 
