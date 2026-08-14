@@ -832,7 +832,9 @@ class PJLinkProjector extends IPSModule
 
         // Zähler im Buffer mitführen und nur gedrosselt in die Variable schreiben.
         // Jeder Schreibvorgang landet sonst als eigene Zeile im Meldungslog.
-        $cnt = (int)$this->GetBuffer('ErrCnt') + 1;
+        // Buffer leer = Modul wurde neu geladen -> beim Variablenwert weiterzählen.
+        $roh = $this->GetBuffer('ErrCnt');
+        $cnt = (($roh === '') ? (int)$this->GetValue('ErrorCounter') : (int)$roh) + 1;
         $this->SetBuffer('ErrCnt', (string)$cnt);
 
         $takt = max(60, (int)$this->ReadPropertyInteger('ErrorLogCooldown'));
