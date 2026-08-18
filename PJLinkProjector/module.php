@@ -58,6 +58,10 @@ class PJLinkProjector extends IPSModule
         // Fehlermeldungen drosseln (Sekunden, 0 = keine Drosselung)
         $this->RegisterPropertyInteger('ErrorLogCooldown', 60);
 
+        // Vom Gerät gemeldete Eingangsnamen (PJLink Class 2, INNM) als JSON.
+        // Attribut statt Property, damit die Namen ein Modul-Update überleben.
+        $this->RegisterAttributeString('InputNames', '');
+
         // Timer ruft Poll() über Prefix-Funktion auf
         $this->RegisterTimer('PollTimer', 0, 'PJP_Poll($_IPS[\'TARGET\']);');
 
@@ -75,7 +79,10 @@ class PJLinkProjector extends IPSModule
 
         $this->RegisterVariableInteger('PowerState', 'Projektor Power Status', 'PJP.PowerState');
 
-        $this->RegisterVariableInteger('Input', 'Projektor Quelle', 'PJP.Input.Logical');
+        // Instanzeigenes Profil: die Beschriftung kommt vom Gerät (INNM) und darf
+        // andere Instanzen/Anlagen nicht mitverändern.
+        $this->EnsureInstanceInputProfile();
+        $this->RegisterVariableInteger('Input', 'Projektor Quelle', $this->InputProfileName());
         $this->EnableAction('Input');
 
         $this->RegisterVariableBoolean('Busy', 'Projektor Busy', '~Switch');
@@ -593,6 +600,18 @@ class PJLinkProjector extends IPSModule
                 // Polling-Strategie
                 $self->ApplyPollingStrategy();
 
+                // Einmalig nach Installation/Modul-Update: Eingänge und ihre echte
+                // Beschriftung vom Gerät holen. Läuft schon in der 'poll'-Sperre,
+                // deshalb direkt RefreshInputMetadata() statt der öffentlichen Variante.
+                if (trim((string)$self->ReadAttributeString('InputNames')) === '') {
+                    try {
+                        $self->RefreshInputMetadata($host, $port, $pw, $timeout);
+                    } catch (Exception $eMeta) {
+                        // Reine Beschriftung - darf den Poll nicht offline melden
+                        $self->LogMessage('Eingangsnamen nicht lesbar: ' . $eMeta->getMessage(), KL_DEBUG);
+                    }
+                }
+
             } catch (Exception $e) {
 
                 if ($self->IsTransientPJLinkError($e->getMessage()) && $self->IsLikelyPowerTransition()) {
@@ -631,9 +650,7 @@ class PJLinkProjector extends IPSModule
                 $pw   = (string)$self->ReadPropertyString('Password');
                 $timeout = 2;
 
-                $inputs = $self->PJLinkGetAvailableInputs($host, $port, $pw, $timeout);
-                $result = implode(' ', $inputs);
-                $self->SetValue('AvailableInputs', $result);
+                $result = $self->RefreshInputMetadata($host, $port, $pw, $timeout);
             } catch (Exception $e) {
                 $self->HandleImmediateCommandError('INST-Abfrage', $e);
             }
@@ -644,6 +661,43 @@ class PJLinkProjector extends IPSModule
         }
 
         return $result;
+    }
+
+    /**
+     * Liest die verfügbaren Eingänge (INST) und - bei Class-2-Geräten - deren
+     * echte Beschriftung (INNM) und schreibt sie ins instanzeigene Profil.
+     * Ohne Sperre, muss also innerhalb von WithLock('poll') aufgerufen werden.
+     */
+    private function RefreshInputMetadata($host, $port, $pw, $timeout)
+    {
+        $inputs = $this->PJLinkGetAvailableInputs($host, $port, $pw, $timeout);
+        $list = implode(' ', $inputs);
+        $this->SetValue('AvailableInputs', $list);
+
+        if ($this->PJLinkGetClass($host, $port, $pw, $timeout) < 2) {
+            // Class 1 kennt keine Namen - Fallback-Beschriftung behalten
+            return $list;
+        }
+
+        $names = [];
+        foreach (array_keys($this->DefaultInputNames()) as $logical) {
+            $code = $this->MapInputToDevice($logical);
+            if ($code <= 0 || !in_array((string)$code, $inputs, true)) {
+                continue;
+            }
+
+            $name = $this->PJLinkGetInputNameOrNull($host, $port, $pw, $code, $timeout);
+            if ($name !== null) {
+                $names[$logical] = $name;
+            }
+        }
+
+        if ($names !== []) {
+            $this->WriteAttributeString('InputNames', json_encode($names));
+            $this->EnsureInstanceInputProfile();
+        }
+
+        return $list;
     }
 
     private function ApplyLogic($ip, $port, $pw, $timeout, $pwrState, $curDeviceInput)
@@ -973,6 +1027,48 @@ class PJLinkProjector extends IPSModule
         IPS_SetVariableProfileValues('PJP.LightLevel', 0, 250, 1);
     }
 
+    // Profilname je Instanz - die Beschriftung stammt vom konkreten Gerät.
+    private function InputProfileName()
+    {
+        return 'PJP.Input.' . $this->InstanceID;
+    }
+
+    // Fallback-Beschriftung, solange das Gerät nichts Eigenes gemeldet hat
+    private function DefaultInputNames()
+    {
+        return [1 => 'HDMI 1', 2 => 'HDMI 2', 3 => 'HDBaseT'];
+    }
+
+    /**
+     * Legt das instanzeigene Input-Profil an bzw. schreibt die Beschriftung neu.
+     * Muss aus ApplyChanges laufen: Destroy() räumt Instanzprofile beim
+     * Modul-Update ab, die Namen kommen dann aus dem Attribut zurück.
+     */
+    private function EnsureInstanceInputProfile()
+    {
+        $profile = $this->InputProfileName();
+
+        if (!IPS_VariableProfileExists($profile)) {
+            IPS_CreateVariableProfile($profile, VARIABLETYPE_INTEGER);
+            IPS_SetVariableProfileIcon($profile, 'TV');
+        }
+
+        $names = $this->DefaultInputNames();
+
+        $cached = json_decode((string)$this->ReadAttributeString('InputNames'), true);
+        if (is_array($cached)) {
+            foreach ($names as $logical => $fallback) {
+                if (isset($cached[$logical]) && trim((string)$cached[$logical]) !== '') {
+                    $names[$logical] = trim((string)$cached[$logical]);
+                }
+            }
+        }
+
+        foreach ($names as $logical => $name) {
+            IPS_SetVariableProfileAssociation($profile, $logical, $name, '', 0);
+        }
+    }
+
     // ---------- Input Mapping ----------
     private function MapInputToDevice($logical)
     {
@@ -1087,6 +1183,33 @@ class PJLinkProjector extends IPSModule
             throw new Exception("INST nicht verfügbar (ERR3).");
         }
         throw new Exception("INST? unerwartet: $r");
+    }
+
+    // PJLink-Klasse des Geräts (1 oder 2). Nur Class 2 kennt INNM.
+    private function PJLinkGetClass($ip, $port, $pw, $timeout)
+    {
+        $r = $this->PJLinkSend($ip, $port, $pw, "%1CLSS ?", $timeout);
+
+        if (preg_match('/%1CLSS=([12])/', $r, $m)) {
+            return (int)$m[1];
+        }
+        throw new Exception("CLSS? unerwartet: $r");
+    }
+
+    // Eingangsname, wie ihn das Gerät selbst führt (z. B. "InputC" beim Sony VPL-FHZ80)
+    private function PJLinkGetInputNameOrNull($ip, $port, $pw, $deviceCode, $timeout)
+    {
+        $r = $this->PJLinkSend($ip, $port, $pw, "%2INNM ?" . (int)$deviceCode, $timeout);
+
+        if (preg_match('/%2INNM=(.*)$/', $r, $m)) {
+            $name = trim($m[1]);
+            // ERR1/ERR2 = Eingang kennt das Gerät nicht, ERR3/ERR4 = gerade nicht abfragbar
+            if ($name === '' || preg_match('/^ERR[1-4]$/', $name)) {
+                return null;
+            }
+            return $name;
+        }
+        return null;
     }
 
     private function PJLinkSetInput($ip, $port, $pw, $input, $timeout)

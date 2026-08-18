@@ -55,6 +55,7 @@
     { "type": "NumberSpinner", "name": "AutoManualPauseMinutes", "caption": "Pause nach manueller Änderung (Min., 0 = aus)", "minimum": 0, "maximum": 480 }
   ],
   "actions": [
-    { "type": "Button", "caption": "Jetzt Status aktualisieren", "onClick": "PJP_Poll($id);" }
+    { "type": "Button", "caption": "Jetzt Status aktualisieren", "onClick": "PJP_Poll($id);" },
+    { "type": "Button", "caption": "Eingänge neu einlesen (Namen vom Gerät)", "onClick": "PJP_RefreshAvailableInputs($id);" }
   ]
 }

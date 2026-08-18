@@ -3,9 +3,10 @@
   "author": "Doijen - FACE Gmbh",
   "name": "PJLink Projector (Sony/Epson)",
   "url": "https://github.com/JLDFACE/IPSymconPJLinkControl",
-  "compatibility": { "version": "6.0" },
+  "compatibility": {
+    "version": "6.0"
+  },
   "version": "1.0",
-  "build": 4,
-  "date": 20260814
-
+  "build": 5,
+  "date": 20260818
 }
