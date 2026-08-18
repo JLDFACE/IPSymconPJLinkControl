@@ -62,6 +62,10 @@ class PJLinkProjector extends IPSModule
         // Attribut statt Property, damit die Namen ein Modul-Update überleben.
         $this->RegisterAttributeString('InputNames', '');
 
+        // Eingangsliste des Geräts (PJLink INST) als JSON. Damit lassen sich
+        // Hersteller-Defaults prüfen, die es am konkreten Modell nicht gibt.
+        $this->RegisterAttributeString('DeviceInputs', '');
+
         // Timer ruft Poll() über Prefix-Funktion auf
         $this->RegisterTimer('PollTimer', 0, 'PJP_Poll($_IPS[\'TARGET\']);');
 
@@ -603,7 +607,8 @@ class PJLinkProjector extends IPSModule
                 // Einmalig nach Installation/Modul-Update: Eingänge und ihre echte
                 // Beschriftung vom Gerät holen. Läuft schon in der 'poll'-Sperre,
                 // deshalb direkt RefreshInputMetadata() statt der öffentlichen Variante.
-                if (trim((string)$self->ReadAttributeString('InputNames')) === '') {
+                if (trim((string)$self->ReadAttributeString('DeviceInputs')) === ''
+                    || trim((string)$self->ReadAttributeString('InputNames')) === '') {
                     try {
                         $self->RefreshInputMetadata($host, $port, $pw, $timeout);
                     } catch (Exception $eMeta) {
@@ -670,19 +675,41 @@ class PJLinkProjector extends IPSModule
      */
     private function RefreshInputMetadata($host, $port, $pw, $timeout)
     {
-        $inputs = $this->PJLinkGetAvailableInputs($host, $port, $pw, $timeout);
+        $inputs = array_map('intval', $this->PJLinkGetAvailableInputs($host, $port, $pw, $timeout));
         $list = implode(' ', $inputs);
         $this->SetValue('AvailableInputs', $list);
 
+        // Eingangsliste merken, bevor die Codes aufgelöst werden - erst damit
+        // kann ResolveInputCodes() einen Default verwerfen, den es nicht gibt.
+        $before = $this->ResolveInputCodes();
+        $this->WriteAttributeString('DeviceInputs', json_encode($inputs));
+        $after = $this->ResolveInputCodes();
+
+        foreach ($after as $logical => $code) {
+            if ((int)$code !== (int)$before[$logical]) {
+                $this->LogMessage(
+                    'Eingang ' . $logical . ': Code ' . $before[$logical] . ' kennt das Gerät nicht, '
+                    . 'verwende ' . $code . ' (gemeldet: ' . $list . ').',
+                    KL_MESSAGE
+                );
+            }
+        }
+
         if ($this->PJLinkGetClass($host, $port, $pw, $timeout) < 2) {
-            // Class 1 kennt keine Namen - Fallback-Beschriftung behalten
+            // Class 1 kennt INNM nicht. Leeres Ergebnis festschreiben, sonst
+            // fragt der Poll bei jedem Durchlauf erneut nach.
+            $this->WriteAttributeString('InputNames', '{}');
             return $list;
         }
 
+        // PJLink erlaubt nur eine Sitzung: kollidiert die Abfrage mit dem
+        // regulären Poll, kommt ein leerer Handshake zurück und PJLinkSend
+        // wirft. Das Attribut bleibt dann ungeschrieben und der nächste Poll
+        // wiederholt - besser als eine halb beschriftete Belegung einzubrennen.
         $names = [];
         foreach (array_keys($this->DefaultInputNames()) as $logical) {
-            $code = $this->MapInputToDevice($logical);
-            if ($code <= 0 || !in_array((string)$code, $inputs, true)) {
+            $code = (int)$this->MapInputToDevice($logical);
+            if ($code <= 0 || !in_array($code, $inputs, true)) {
                 continue;
             }
 
@@ -692,10 +719,8 @@ class PJLinkProjector extends IPSModule
             }
         }
 
-        if ($names !== []) {
-            $this->WriteAttributeString('InputNames', json_encode($names));
-            $this->EnsureInstanceInputProfile();
-        }
+        $this->WriteAttributeString('InputNames', json_encode($names));
+        $this->EnsureInstanceInputProfile();
 
         return $list;
     }
@@ -1072,24 +1097,91 @@ class PJLinkProjector extends IPSModule
     // ---------- Input Mapping ----------
     private function MapInputToDevice($logical)
     {
+        $codes = $this->ResolveInputCodes();
+        $l = (int)$logical;
+
+        return isset($codes[$l]) ? (int)$codes[$l] : 0;
+    }
+
+    // Eingangsliste, die das Gerät zuletzt über INST gemeldet hat
+    private function KnownDeviceInputs()
+    {
+        $raw = json_decode((string)$this->ReadAttributeString('DeviceInputs'), true);
+        if (!is_array($raw)) {
+            return [];
+        }
+
+        $codes = array_values(array_unique(array_map('intval', $raw)));
+        sort($codes);
+
+        return $codes;
+    }
+
+    /**
+     * Liefert die PJLink-Codes der drei logischen Eingänge.
+     *
+     * Reihenfolge: manueller Override gewinnt immer, sonst der Hersteller-Default.
+     * Kennt das Modul die Eingangsliste des Geräts und der Default steht nicht
+     * darin, wird ein freier Eingang derselben PJLink-Gruppe genommen. Sony
+     * gibt HDBaseT je nach Modell als 33 oder 36 aus - der Default 36 läuft am
+     * VPL-FHZ80 sonst in ERR2, weil das Gerät nur 31/32/33 kennt.
+     */
+    private function ResolveInputCodes()
+    {
         $vendor = (string)$this->ReadPropertyString('Vendor');
 
-        $defHDMI1 = ($vendor === 'SONY') ? 31 : 32;
-        $defHDMI2 = ($vendor === 'SONY') ? 32 : 33;
-        $defHDBT  = ($vendor === 'SONY') ? 36 : 56;
+        $defaults = ($vendor === 'SONY')
+            ? [1 => 31, 2 => 32, 3 => 36]
+            : [1 => 32, 2 => 33, 3 => 56];
 
-        $c1 = (int)$this->ReadPropertyInteger('CodeHDMI1');
-        $c2 = (int)$this->ReadPropertyInteger('CodeHDMI2');
-        $c3 = (int)$this->ReadPropertyInteger('CodeHDBT');
+        $overrides = [
+            1 => (int)$this->ReadPropertyInteger('CodeHDMI1'),
+            2 => (int)$this->ReadPropertyInteger('CodeHDMI2'),
+            3 => (int)$this->ReadPropertyInteger('CodeHDBT'),
+        ];
 
-        if ($c1 === 0) $c1 = $defHDMI1;
-        if ($c2 === 0) $c2 = $defHDMI2;
-        if ($c3 === 0) $c3 = $defHDBT;
+        $codes = [];
+        foreach ($defaults as $logical => $default) {
+            $codes[$logical] = ($overrides[$logical] > 0) ? $overrides[$logical] : $default;
+        }
 
-        if ((int)$logical === 1) return $c1;
-        if ((int)$logical === 2) return $c2;
-        if ((int)$logical === 3) return $c3;
-        return 0;
+        $available = $this->KnownDeviceInputs();
+        if ($available === []) {
+            // Gerät noch nie erreicht - beim bisherigen Verhalten bleiben
+            return $codes;
+        }
+
+        // Belegt ist, was der Anwender gesetzt hat oder was das Gerät bestätigt
+        $taken = [];
+        foreach ($codes as $logical => $code) {
+            if ($overrides[$logical] > 0 || in_array($code, $available, true)) {
+                $taken[] = $code;
+            }
+        }
+
+        foreach ($codes as $logical => $code) {
+            if ($overrides[$logical] > 0 || in_array($code, $available, true)) {
+                continue;
+            }
+
+            // Gleiche PJLink-Gruppe: 1x RGB, 2x Video, 3x Digital, 4x Storage, 5x Netzwerk
+            $group = intdiv($code, 10);
+
+            foreach ($available as $candidate) {
+                if (intdiv($candidate, 10) !== $group) {
+                    continue;
+                }
+                if (in_array($candidate, $taken, true)) {
+                    continue;
+                }
+
+                $codes[$logical] = $candidate;
+                $taken[] = $candidate;
+                break;
+            }
+        }
+
+        return $codes;
     }
 
     private function UnmapInputToLogical($deviceCode)
