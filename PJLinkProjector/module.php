@@ -41,6 +41,7 @@ class PJLinkProjector extends IPSModule
         $this->RegisterPropertyInteger('CodeHDMI1', 0);
         $this->RegisterPropertyInteger('CodeHDMI2', 0);
         $this->RegisterPropertyInteger('CodeHDBT',  0);
+        $this->RegisterPropertyInteger('CodeSDI',   0);
 
         $this->RegisterPropertyInteger('InputDelay', 10);
 
@@ -1024,6 +1025,7 @@ class PJLinkProjector extends IPSModule
             IPS_SetVariableProfileAssociation('PJP.Input.Logical', 1, 'HDMI 1', '', 0);
             IPS_SetVariableProfileAssociation('PJP.Input.Logical', 2, 'HDMI 2', '', 0);
             IPS_SetVariableProfileAssociation('PJP.Input.Logical', 3, 'HDBaseT', '', 0);
+            IPS_SetVariableProfileAssociation('PJP.Input.Logical', 4, 'SDI', '', 0);
         }
 
         // Zeitstempel als formatierte Zeit anzeigen
@@ -1061,7 +1063,7 @@ class PJLinkProjector extends IPSModule
     // Fallback-Beschriftung, solange das Gerät nichts Eigenes gemeldet hat
     private function DefaultInputNames()
     {
-        return [1 => 'HDMI 1', 2 => 'HDMI 2', 3 => 'HDBaseT'];
+        return [1 => 'HDMI 1', 2 => 'HDMI 2', 3 => 'HDBaseT', 4 => 'SDI'];
     }
 
     /**
@@ -1089,8 +1091,14 @@ class PJLinkProjector extends IPSModule
             }
         }
 
+        // Eingänge ohne aufgelösten Code (z. B. SDI ohne Hersteller-Default)
+        // erscheinen nicht in der Auswahl - sie ließen sich ohnehin nicht
+        // schalten. Ein leerer Name entfernt eine bereits gesetzte Zuordnung.
+        $codes = $this->ResolveInputCodes();
+
         foreach ($names as $logical => $name) {
-            IPS_SetVariableProfileAssociation($profile, $logical, $name, '', 0);
+            $usable = isset($codes[$logical]) && (int)$codes[$logical] > 0;
+            IPS_SetVariableProfileAssociation($profile, $logical, $usable ? $name : '', '', 0);
         }
     }
 
@@ -1130,14 +1138,18 @@ class PJLinkProjector extends IPSModule
     {
         $vendor = (string)$this->ReadPropertyString('Vendor');
 
+        // SDI kennt nur Epson mit einem festen Default (34). Für Sony ist der
+        // Code modellabhängig und wird deshalb nicht geraten - dort bleibt der
+        // Eingang aus, bis jemand den Code von Hand setzt.
         $defaults = ($vendor === 'SONY')
-            ? [1 => 31, 2 => 32, 3 => 36]
-            : [1 => 32, 2 => 33, 3 => 56];
+            ? [1 => 31, 2 => 32, 3 => 36, 4 => 0]
+            : [1 => 32, 2 => 33, 3 => 56, 4 => 34];
 
         $overrides = [
             1 => (int)$this->ReadPropertyInteger('CodeHDMI1'),
             2 => (int)$this->ReadPropertyInteger('CodeHDMI2'),
             3 => (int)$this->ReadPropertyInteger('CodeHDBT'),
+            4 => (int)$this->ReadPropertyInteger('CodeSDI'),
         ];
 
         $codes = [];
@@ -1163,6 +1175,10 @@ class PJLinkProjector extends IPSModule
             if ($overrides[$logical] > 0 || in_array($code, $available, true)) {
                 continue;
             }
+            if ($code <= 0) {
+                // Kein Default bekannt - ohne Gruppe gibt es nichts zu raten.
+                continue;
+            }
 
             // Gleiche PJLink-Gruppe: 1x RGB, 2x Video, 3x Digital, 4x Storage, 5x Netzwerk
             $group = intdiv($code, 10);
@@ -1186,13 +1202,17 @@ class PJLinkProjector extends IPSModule
 
     private function UnmapInputToLogical($deviceCode)
     {
-        $c1 = (int)$this->MapInputToDevice(1);
-        $c2 = (int)$this->MapInputToDevice(2);
-        $c3 = (int)$this->MapInputToDevice(3);
+        $deviceCode = (int)$deviceCode;
+        if ($deviceCode <= 0) {
+            return 0;
+        }
 
-        if ((int)$deviceCode === $c1) return 1;
-        if ((int)$deviceCode === $c2) return 2;
-        if ((int)$deviceCode === $c3) return 3;
+        foreach ($this->ResolveInputCodes() as $logical => $code) {
+            if ((int)$code === $deviceCode) {
+                return (int)$logical;
+            }
+        }
+
         return 0;
     }
 

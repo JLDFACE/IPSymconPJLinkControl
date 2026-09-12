@@ -17,6 +17,7 @@
     { "type": "NumberSpinner", "name": "CodeHDMI1", "caption": "Code HDMI 1", "minimum": 0, "maximum": 99 },
     { "type": "NumberSpinner", "name": "CodeHDMI2", "caption": "Code HDMI 2", "minimum": 0, "maximum": 99 },
     { "type": "NumberSpinner", "name": "CodeHDBT",  "caption": "Code HDBaseT", "minimum": 0, "maximum": 99 },
+    { "type": "NumberSpinner", "name": "CodeSDI",   "caption": "Code SDI (Epson: 34, Sony: modellabhängig)", "minimum": 0, "maximum": 99 },
 
     { "type": "NumberSpinner", "name": "InputDelay", "caption": "Input-Delay nach echtem Power-On (Sek.)", "minimum": 0, "maximum": 120 },
 

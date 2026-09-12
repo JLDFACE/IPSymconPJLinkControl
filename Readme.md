@@ -1,7 +1,7 @@
 # PJLink Projector
 
 Dieses Modul ermöglicht die Steuerung von Projektoren über **PJLink (Class 1)** in **IP-Symcon**.  
-Unterstützt werden aktuell **Sony**- und **Epson**-Projektoren mit HDMI- und HDBaseT-Eingängen.
+Unterstützt werden aktuell **Sony**- und **Epson**-Projektoren mit HDMI-, HDBaseT- und SDI-Eingängen.
 
 Zusätzlich kann für **Epson-Modelle mit Epson Web Control** die **Laser-Lichtleistung / Helligkeit**
 gesteuert werden (getestet am **Epson QS100**) – inklusive einer **automatischen Anpassung an die
@@ -54,6 +54,7 @@ Nach dem Hinzufügen das Modul aktualisieren.
 | Code HDMI 1 | Optionaler PJLink-Code für HDMI 1 |
 | Code HDMI 2 | Optionaler PJLink-Code für HDMI 2 |
 | Code HDBaseT | Optionaler PJLink-Code für HDBaseT |
+| Code SDI | Optionaler PJLink-Code für SDI (Epson-Standard 34, bei Sony modellabhängig und daher Pflicht) |
 | Input-Delay | Verzögerung nach echtem Power-On vor Quellenumschaltung |
 | PollFast | Polling-Intervall bei Übergängen |
 | PollSlow | Polling-Intervall im stabilen Zustand |
@@ -66,11 +67,13 @@ Nach dem Hinzufügen das Modul aktualisieren.
 - HDMI 1: 31
 - HDMI 2: 32
 - HDBaseT: 36
+- SDI: kein Standard (Code von Hand setzen, sonst wird der Eingang nicht angeboten)
 
 **Epson**
 - HDMI 1: 32
 - HDMI 2: 33
 - HDBaseT: 56
+- SDI: 34
 
 ### Helligkeit / Lichtleistung (Epson Web Control)
 
@@ -103,7 +106,7 @@ Nach dem Hinzufügen das Modul aktualisieren.
 |--------|-----|--------------|
 | Power | Boolean | Projektor Ein / Aus |
 | PowerState | Integer | 0=Aus, 1=An, 2=Cool-down, 3=Warm-up |
-| Input | Integer | HDMI 1 / HDMI 2 / HDBaseT |
+| Input | Integer | HDMI 1 / HDMI 2 / HDBaseT / SDI |
 | Busy | Boolean | Projektor befindet sich im Übergang |
 | Online | Boolean | Projektor erreichbar |
 | LastError | String | Letzter Fehler |
