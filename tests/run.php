@@ -292,6 +292,52 @@ try {
     stoppeProjektor($p);
 }
 
+// ---------------------------------------------------------------- Kann nichts davon
+abschnitt('Geraet kennt keine der Zusatzfunktionen - darf keine Fehler schreiben');
+$p = starteProjektor(['unsupported' => 'AVMT,FREZ,ERST,LAMP,FILT,IRES,SNUM,SVER,INNM']);
+try {
+    $m = neuesModul($p['port'], [
+        'EnableAVMute' => true, 'EnableFreeze' => true,
+        'EnableDiagnostics' => true, 'DiagInterval' => 30,
+    ]);
+    $m->ApplyChanges();
+
+    IPSKernel::$log = [];
+    for ($i = 0; $i < 3; $i++) {
+        $m->SetBuffer('DiagTS', '0'); // Drossel aus, damit die Diagnose jedes Mal laeuft
+        $m->Poll();
+    }
+
+    gleich('Projektor bleibt online', true, $m->GetValue('Online'));
+    gleich('Kein Fehlertext hinterlegt', '', $m->GetValue('LastError'));
+    gleich('Fehlerzaehler bleibt 0', 0, $m->GetValue('ErrorCounter'));
+    gleich('Power weiterhin gelesen', 1, $m->GetValue('PowerState'));
+    gleich('Quelle weiterhin gelesen', 1, $m->GetValue('Input'));
+
+    $laut = array_filter(IPSKernel::$log, function ($z) {
+        return strpos($z, 'WARN') === 0 || strpos($z, 'ERROR') === 0;
+    });
+    pruefe('Keine Warnung und kein Fehler im Meldungslog',
+        count($laut) === 0, implode(' | ', $laut));
+
+    // Die Variablen bleiben schlicht auf ihrem Anfangswert stehen
+    gleich('Betriebsstunden bleiben 0', 0, $m->GetValue('LampHours'));
+    gleich('Fehlerstatus bleibt leer', '', $m->GetValue('ErrorStatus'));
+    gleich('AV-Mute bleibt aus', false, $m->GetValue('AVMute'));
+
+    // Bedient jemand die Funktion trotzdem, gibt es genau eine gedrosselte Warnung
+    IPSKernel::$log = [];
+    $m->RequestAction('AVMute', true);
+    $warn = array_filter(IPSKernel::$log, function ($z) {
+        return strpos($z, 'WARN') === 0;
+    });
+    pruefe('Handbedienung meldet sich genau einmal', count($warn) === 1, implode(' | ', $warn));
+    gleich('Sollwert zurueckgenommen', false, $m->GetValue('AVMute'));
+    gleich('Projektor trotzdem online', true, $m->GetValue('Online'));
+} finally {
+    stoppeProjektor($p);
+}
+
 // ---------------------------------------------------------------- Migration
 abschnitt('Alte Eingangsnamen (nach Platz) ziehen auf Geraetecodes um');
 $p = starteProjektor([]);

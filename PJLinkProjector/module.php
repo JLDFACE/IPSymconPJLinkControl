@@ -865,7 +865,10 @@ class PJLinkProjector extends IPSModule
                     // Im Standby gibt es keine Stummschaltung
                     $this->SetValueIfChanged('AVMute', false);
                 }
-            } catch (Exception $e) {
+            } catch (Throwable $e) {
+                // Throwable statt Exception: an dieser Stelle darf NICHTS nach oben
+                // durchschlagen, sonst meldet der Poll den Projektor offline, nur weil
+                // er einen Komfortbefehl nicht kennt.
                 $this->LogMessage('AVMT nicht lesbar: ' . $e->getMessage(), KL_DEBUG);
             }
         }
@@ -881,7 +884,7 @@ class PJLinkProjector extends IPSModule
                 } elseif ((int)$pwrState === 0) {
                     $this->SetValueIfChanged('Freeze', false);
                 }
-            } catch (Exception $e) {
+            } catch (Throwable $e) {
                 $this->LogMessage('FREZ nicht lesbar: ' . $e->getMessage(), KL_DEBUG);
             }
         }
@@ -900,7 +903,7 @@ class PJLinkProjector extends IPSModule
 
         try {
             $this->ReadDiagnosticsInto($host, $port, $pw, $timeout, $an);
-        } catch (Exception $e) {
+        } catch (Throwable $e) {
             $this->LogMessage('Diagnose-Abfrage fehlgeschlagen: ' . $e->getMessage(), KL_DEBUG);
         }
     }

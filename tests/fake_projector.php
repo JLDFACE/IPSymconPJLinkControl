@@ -63,6 +63,12 @@ $namen = [
     '33' => 'DIGITAL LINK', '41' => 'MEMORY VIEWER', '51' => 'NETWORK',
 ];
 
+// Befehle, die das Geraet gar nicht kennt - antwortet mit ERR1 wie ein aelteres Modell
+$unsupported = [];
+if (!empty($opt['unsupported'])) {
+    $unsupported = array_map('trim', explode(',', strtoupper($opt['unsupported'])));
+}
+
 $avmtReject = isset($opt['avmt-reject']) ? (int)$opt['avmt-reject'] : 0;
 $freezErr3  = isset($opt['freez-err3']);
 $quietOn    = (string)($opt['quiet-on'] ?? '');
@@ -172,6 +178,12 @@ while (true) {
 
         // Class-2-Befehl an einem Class-1-Geraet
         if ($cmdKlasse > $klasse) {
+            fwrite($client, $kopf . 'ERR1' . $terminator);
+            continue;
+        }
+
+        // Befehl, den dieses Modell gar nicht kennt
+        if (in_array($cmd, $unsupported, true)) {
             fwrite($client, $kopf . 'ERR1' . $terminator);
             continue;
         }

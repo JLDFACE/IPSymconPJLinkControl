@@ -289,6 +289,22 @@ Der Sollwert wird dann zurückgenommen, der Projektor bleibt online.
 Ein Class-1-Gerät kennt weder `FREZ` noch `INNM`, `FILT`, `IRES`, `SNUM` und `SVER`. Das Modul
 ermittelt die Klasse einmal über `CLSS` und lässt diese Befehle dann ganz weg.
 
+### Was passiert, wenn der Projektor das alles nicht kann?
+
+**Nichts Lautes.** Lehnt ein Gerät die Zusatzbefehle ab, schreibt das Modul **keine Warnung und
+keinen Fehler** ins Meldungslog, meldet den Projektor **nicht offline** und lässt Power und
+Quellenwahl unberührt. Die betroffenen Variablen bleiben schlicht auf ihrem Wert stehen.
+
+Der Grund: jede Zusatzabfrage läuft in einer eigenen Absicherung und landet im Fehlerfall
+höchstens auf der Stufe **Debug**. Der Poll selbst bekommt davon nichts mit.
+
+Eine Ausnahme gibt es bewusst: **bedient jemand eine Funktion, die das Gerät nicht kann**,
+erscheint **eine** gedrosselte Warnung und der Sollwert wird zurückgenommen. Sonst stünde in
+der Visualisierung ein Zustand, den es nie gab, und niemand wüsste warum.
+
+Geprüft ist das in `tests/run.php` mit einem Gerät, das `AVMT`, `FREZ`, `ERST`, `LAMP`, `FILT`,
+`IRES`, `SNUM`, `SVER` und `INNM` allesamt mit `ERR1` beantwortet.
+
 ---
 
 ## Tests
