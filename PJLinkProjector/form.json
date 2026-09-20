@@ -6,7 +6,8 @@
       "caption": "Hersteller",
       "options": [
         { "caption": "Sony", "value": "SONY" },
-        { "caption": "Epson", "value": "EPSON" }
+        { "caption": "Epson", "value": "EPSON" },
+        { "caption": "Panasonic", "value": "PANASONIC" }
       ]
     },
     { "type": "ValidationTextBox", "name": "Host", "caption": "IP / Hostname" },
@@ -14,10 +15,11 @@
     { "type": "PasswordTextBox", "name": "Password", "caption": "PJLink Passwort (leer wenn aus)" },
 
     { "type": "Label", "caption": "Input-Codes: 0 = Standard pro Hersteller. Nur nötig, wenn Ihr Gerät abweicht." },
+    { "type": "Label", "caption": "Alle weiteren Eingänge, die der Projektor meldet (z. B. COMPUTER, MEMORY VIEWER, NETWORK), stehen automatisch in der Quellen-Auswahl – dort ist der PJLink-Code zugleich der Wert der Variable." },
     { "type": "NumberSpinner", "name": "CodeHDMI1", "caption": "Code HDMI 1", "minimum": 0, "maximum": 99 },
     { "type": "NumberSpinner", "name": "CodeHDMI2", "caption": "Code HDMI 2", "minimum": 0, "maximum": 99 },
-    { "type": "NumberSpinner", "name": "CodeHDBT",  "caption": "Code HDBaseT", "minimum": 0, "maximum": 99 },
-    { "type": "NumberSpinner", "name": "CodeSDI",   "caption": "Code SDI (Epson: 34, Sony: modellabhängig)", "minimum": 0, "maximum": 99 },
+    { "type": "NumberSpinner", "name": "CodeHDBT",  "caption": "Code HDBaseT / DIGITAL LINK", "minimum": 0, "maximum": 99 },
+    { "type": "NumberSpinner", "name": "CodeSDI",   "caption": "Code SDI (Epson: 34, Sony/Panasonic: modellabhängig)", "minimum": 0, "maximum": 99 },
 
     { "type": "NumberSpinner", "name": "InputDelay", "caption": "Input-Delay nach echtem Power-On (Sek.)", "minimum": 0, "maximum": 120 },
 
@@ -27,6 +29,12 @@
 
     { "type": "NumberSpinner", "name": "FastAfterChange", "caption": "Nach Statusänderung schnell pollen (Sek.)", "minimum": 0, "maximum": 300 },
     { "type": "NumberSpinner", "name": "ErrorLogCooldown", "caption": "Fehler-Log Drosselung (Sek., 0 = aus)", "minimum": 0, "maximum": 3600 },
+
+    { "type": "Label", "caption": "Zusatzfunktionen des PJLink-Standards (herstellerunabhängig):" },
+    { "type": "CheckBox", "name": "EnableAVMute", "caption": "Bild/Ton stumm schalten (AVMT, Shutter)" },
+    { "type": "CheckBox", "name": "EnableFreeze", "caption": "Standbild (FREZ, nur PJLink Class 2)" },
+    { "type": "CheckBox", "name": "EnableDiagnostics", "caption": "Diagnose: Betriebsstunden, Fehlerstatus, Geräteinfo, Auflösung" },
+    { "type": "NumberSpinner", "name": "DiagInterval", "caption": "Abstand der Diagnose-Abfragen (Sek.)", "minimum": 30, "maximum": 86400 },
 
     { "type": "Label", "caption": "Helligkeit / Lichtleistung über Epson Web Control (nur Epson-Modelle mit aktivierter Web-API):" },
     { "type": "CheckBox", "name": "EnableBrightness", "caption": "Lichtleistungs-Steuerung aktivieren" },
@@ -57,6 +65,7 @@
   ],
   "actions": [
     { "type": "Button", "caption": "Jetzt Status aktualisieren", "onClick": "PJP_Poll($id);" },
-    { "type": "Button", "caption": "Eingänge neu einlesen (Namen vom Gerät)", "onClick": "PJP_RefreshAvailableInputs($id);" }
+    { "type": "Button", "caption": "Eingänge neu einlesen (Namen vom Gerät)", "onClick": "PJP_RefreshAvailableInputs($id);" },
+    { "type": "Button", "caption": "Geräteinfo neu einlesen (Modell, Seriennummer, Firmware)", "onClick": "echo PJP_ReadDeviceInfo($id);" }
   ]
 }

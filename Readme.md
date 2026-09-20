@@ -1,7 +1,11 @@
 # PJLink Projector
 
-Dieses Modul ermöglicht die Steuerung von Projektoren über **PJLink (Class 1)** in **IP-Symcon**.  
-Unterstützt werden aktuell **Sony**- und **Epson**-Projektoren mit HDMI-, HDBaseT- und SDI-Eingängen.
+Dieses Modul ermöglicht die Steuerung von Projektoren über **PJLink (Class 1 und Class 2)** in **IP-Symcon**.  
+Hersteller-Voreinstellungen gibt es für **Sony**, **Epson** und **Panasonic**; grundsätzlich läuft jeder
+PJLink-fähige Projektor, weil das Modul die **Eingangsliste und deren Beschriftung vom Gerät selbst liest**.
+
+Neben Power und Quellenwahl beherrscht das Modul optional **Bild/Ton stumm (Shutter)**, **Standbild**
+sowie eine **Diagnose** mit Betriebsstunden, Fehlerstatus, Eingangsauflösung und Geräteinfo.
 
 Zusätzlich kann für **Epson-Modelle mit Epson Web Control** die **Laser-Lichtleistung / Helligkeit**
 gesteuert werden (getestet am **Epson QS100**) – inklusive einer **automatischen Anpassung an die
@@ -47,21 +51,42 @@ Nach dem Hinzufügen das Modul aktualisieren.
 
 | Eigenschaft | Beschreibung |
 |------------|--------------|
-| Hersteller | Sony oder Epson (für Default-Inputcodes) |
+| Hersteller | Sony, Epson oder Panasonic (nur für die Default-Inputcodes) |
 | IP / Hostname | IP-Adresse oder Hostname des Projektors |
 | Port | PJLink-Port (Standard: 4352) |
 | Passwort | PJLink-Passwort (leer, wenn keine Authentifizierung aktiv ist) |
 | Code HDMI 1 | Optionaler PJLink-Code für HDMI 1 |
 | Code HDMI 2 | Optionaler PJLink-Code für HDMI 2 |
-| Code HDBaseT | Optionaler PJLink-Code für HDBaseT |
-| Code SDI | Optionaler PJLink-Code für SDI (Epson-Standard 34, bei Sony modellabhängig und daher Pflicht) |
+| Code HDBaseT | Optionaler PJLink-Code für HDBaseT / DIGITAL LINK |
+| Code SDI | Optionaler PJLink-Code für SDI (Epson-Standard 34, bei Sony/Panasonic modellabhängig und daher Pflicht) |
 | Input-Delay | Verzögerung nach echtem Power-On vor Quellenumschaltung |
 | PollFast | Polling-Intervall bei Übergängen |
 | PollSlow | Polling-Intervall im stabilen Zustand |
 | FastAfterChange | Zeitspanne für schnelles Polling nach Statusänderungen |
 | Fehler-Log Drosselung | Mindestabstand zwischen identischen Warnungen (Sek., 0 = aus) |
 
+### Eingänge
+
+Das Modul fragt beim Projektor die Eingangsliste (`INST`) ab und holt sich bei Class-2-Geräten
+zusätzlich die **echte Beschriftung** (`INNM`). Die Quellen-Auswahl in der Visualisierung zeigt
+deshalb genau das, was am Gerät auch im OSD steht.
+
+Die Variable **Input** nutzt zwei Wertebereiche:
+
+| Wert | Bedeutung |
+|------|-----------|
+| 1–4 | Die klassischen Plätze HDMI 1, HDMI 2, HDBaseT, SDI. Bestehende Visualisierungen und Skripte laufen unverändert weiter. |
+| ≥ 11 | Jeder weitere Eingang, den das Gerät meldet – der Wert ist der PJLink-Code selbst (z. B. 11 = COMPUTER, 41 = MEMORY VIEWER, 51 = NETWORK). |
+
+Beispiel Panasonic PT-VMZ72: HDMI1 (31) liegt auf Platz 1, HDMI2 (32) auf Platz 2,
+DIGITAL LINK (33) auf Platz 3; COMPUTER, MEMORY VIEWER und NETWORK stehen unter 11, 41 und 51.
+
+Meldet das Gerät einen Eingang nicht mehr, verschwindet er aus der Auswahl.
+
 ### Default-Inputcodes
+
+Die Codes unten gelten nur, solange das Gerät noch nichts Eigenes gemeldet hat. Steht der Default
+nicht in der Geräteliste, sucht das Modul einen freien Eingang derselben PJLink-Gruppe.
 
 **Sony**
 - HDMI 1: 31
@@ -74,6 +99,24 @@ Nach dem Hinzufügen das Modul aktualisieren.
 - HDMI 2: 33
 - HDBaseT: 56
 - SDI: 34
+
+**Panasonic**
+- HDMI 1: 31
+- HDMI 2: 32
+- DIGITAL LINK (HDBaseT): 33
+- SDI: kein Standard (in dieser Geräteklasse nicht vorhanden)
+
+### Zusatzfunktionen des PJLink-Standards
+
+Alle drei sind ab Werk **aus**, damit bestehende Installationen nach einem Update nicht ungefragt
+neue Variablen bekommen.
+
+| Eigenschaft | Beschreibung |
+|------------|--------------|
+| Bild/Ton stumm schalten | Legt die Variable `AVMute` an (PJLink `AVMT`, Class 1) |
+| Standbild | Legt die Variable `Freeze` an (PJLink `FREZ`, nur Class 2) |
+| Diagnose | Legt Betriebsstunden, Fehlerstatus, Auflösung und Geräteinfo an |
+| Abstand der Diagnose-Abfragen | Wie oft die Diagnosewerte geholt werden (Sek., Vorgabe 300) |
 
 ### Helligkeit / Lichtleistung (Epson Web Control)
 
@@ -106,18 +149,31 @@ Nach dem Hinzufügen das Modul aktualisieren.
 |--------|-----|--------------|
 | Power | Boolean | Projektor Ein / Aus |
 | PowerState | Integer | 0=Aus, 1=An, 2=Cool-down, 3=Warm-up |
-| Input | Integer | HDMI 1 / HDMI 2 / HDBaseT / SDI |
+| Input | Integer | Quelle (Plätze 1–4 oder PJLink-Code ab 11) |
 | Busy | Boolean | Projektor befindet sich im Übergang |
+| AvailableInputs | String | Eingangsliste, wie das Gerät sie meldet |
 | Online | Boolean | Projektor erreichbar |
 | LastError | String | Letzter Fehler |
 | LastOKTimestamp | Integer | Zeitstempel des letzten erfolgreichen Zugriffs |
 | ErrorCounter | Integer | Anzahl aufeinanderfolgender Fehler |
-| LightMode¹ | Integer | Lichtleistungs-Modus: Hoch / Eco / Mittel / Custom |
-| LightLevel¹ | Integer | Lichtleistungs-Pegel 0–250 (nur im Custom-Modus wirksam) |
-| AutoBrightness² | Boolean | Laufzeit-Schalter der automatischen Raumhelligkeits-Regelung |
+| AVMute¹ | Boolean | Bild und Ton stumm (Shutter) |
+| Freeze² | Boolean | Standbild eingefroren |
+| LampHours³ | Integer | Betriebsstunden der Lichtquelle |
+| LampState³ | String | Zustand und Stunden je Lampe |
+| FilterHours³ | Integer | Filter-Betriebsstunden (nur Class 2) |
+| ErrorStatus³ | String | Fehlerstatus im Klartext, sonst „OK" |
+| HasFault³ | Boolean | Mindestens eine Warnung oder ein Fehler liegt an |
+| InputResolution³ | String | Auflösung des anliegenden Signals (nur Class 2) |
+| DeviceInfo³ | String | Hersteller, Modell, Name, Seriennummer, Firmware, Klasse |
+| LightMode⁴ | Integer | Lichtleistungs-Modus: Hoch / Eco / Mittel / Custom |
+| LightLevel⁴ | Integer | Lichtleistungs-Pegel 0–250 (nur im Custom-Modus wirksam) |
+| AutoBrightness⁵ | Boolean | Laufzeit-Schalter der automatischen Raumhelligkeits-Regelung |
 
-¹ nur wenn *Lichtleistungs-Steuerung* aktiviert ist  
-² nur wenn zusätzlich *Auto-Helligkeit* aktiviert ist
+¹ nur wenn *Bild/Ton stumm schalten* aktiviert ist  
+² nur wenn *Standbild* aktiviert ist  
+³ nur wenn *Diagnose* aktiviert ist  
+⁴ nur wenn *Lichtleistungs-Steuerung* aktiviert ist  
+⁵ nur wenn zusätzlich *Auto-Helligkeit* aktiviert ist
 
 ### Interne Variablen (versteckt)
 
@@ -209,11 +265,70 @@ das erneute Einschalten von *AutoBrightness* hebt eine laufende Pause sofort auf
 
 ---
 
+## Bild/Ton stumm, Standbild und Diagnose
+
+### Steuerung per Skript
+
+| Funktion | Beschreibung |
+|----------|--------------|
+| `PJP_SetAVMute($id, true/false)` | Bild und Ton stumm schalten (PJLink `AVMT`) |
+| `PJP_SetFreeze($id, true/false)` | Standbild einfrieren (PJLink `FREZ`, Class 2) |
+| `PJP_ReadDeviceInfo($id)` | Geräteinfo neu einlesen, liefert sie als Text zurück |
+| `PJP_RefreshAvailableInputs($id)` | Eingangsliste und Beschriftung neu vom Gerät holen |
+| `PJP_Poll($id)` | Status sofort aktualisieren |
+
+### Modellabhängigkeiten
+
+Welche `AVMT`-Variante ein Projektor annimmt, ist Herstellersache. Das Modul probiert der Reihe nach
+Bild+Ton (`31`), nur Bild (`11`) und nur Ton (`21`) und merkt sich die erste, die durchgeht.
+Der Panasonic PT-VMZ72 weist zum Beispiel „nur Bild" mit `ERR2` ab.
+
+`FREZ` beantworten viele Geräte mit `ERR3`, solange am gewählten Eingang **kein Signal anliegt**.
+Der Sollwert wird dann zurückgenommen, der Projektor bleibt online.
+
+Ein Class-1-Gerät kennt weder `FREZ` noch `INNM`, `FILT`, `IRES`, `SNUM` und `SVER`. Das Modul
+ermittelt die Klasse einmal über `CLSS` und lässt diese Befehle dann ganz weg.
+
+---
+
+## Tests
+
+Im Ordner `tests/` liegen zwei Wege, das Modul ohne SymBox zu prüfen:
+
+```bash
+php tests/run.php                                       # Testsuite gegen den Simulator
+php tests/live_test.php --host=192.168.2.118 --extras   # gegen einen echten Projektor
+```
+
+`tests/fake_projector.php` ist ein kleiner PJLink-Server. Damit lassen sich Fälle prüfen, die sich an
+echter Hardware kaum herstellen lassen: Class-1-Geräte, aktivierte Authentifizierung, Geräte mit
+CRLF-Zeilenenden, abgelehnte `AVMT`-Varianten und ausbleibende Antworten.
+
+`tests/live_test.php` fährt das Modul gegen ein echtes Gerät und kann auf Wunsch schalten
+(`--power=on|off`, `--switch=<logischer Wert>`, `--avmute=on|off`, `--freeze=on|off`, `--powercycle`).
+
+---
+
 ## Hinweise
 
 - Änderungen am Projektor (z. B. Fernbedienung) werden über Polling erkannt.
 - Für reine Request/Response-Protokolle wie PJLink ist **keine IO-Instanz erforderlich**.
 - Das Modul verwendet ausschließlich PHP-7-kompatible Syntax (SymBox-tauglich).
+- PJLink beendet seine Antworten mit **CR**, nicht mit LF. Das Modul liest deshalb zeichenweise bis
+  zum CR. Mit `fgets()` lief jede einzelne Abfrage stattdessen in den Stream-Timeout – am PT-VMZ72
+  gemessen 4 s pro Befehl statt 50 ms.
+- Während eines Quellenwechsels lassen manche Projektoren eine Antwort aus oder melden `POWR=ERR4`.
+  Beides gilt als vorübergehend und erzeugt keine Ausfallmeldung.
+
+---
+
+## Getestet mit
+
+| Gerät | PJLink | Bemerkung |
+|-------|--------|-----------|
+| Panasonic PT-VMZ72 | Class 2 | Power, alle sechs Eingänge, AV-Mute, Diagnose live geprüft. `FREZ` nur mit anliegendem Signal, `AVMT 11` wird abgewiesen. |
+| Sony VPL-FHZ80 | Class 2 | HDBaseT liegt auf 33 statt 36 |
+| Epson QS100 | Class 2 | zusätzlich Lichtleistung über Epson Web Control |
 
 ---
 

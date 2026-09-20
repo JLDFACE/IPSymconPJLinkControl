@@ -3,7 +3,9 @@
   "name": "PJLinkProjector",
   "type": 3,
   "vendor": "FACE GmbH",
-  "aliases": ["Projektor (PJLink) Sony/Epson"],
+  "aliases": [
+    "Projektor (PJLink) Sony/Epson/Panasonic"
+  ],
   "parentRequirements": [],
   "childRequirements": [],
   "implemented": [],

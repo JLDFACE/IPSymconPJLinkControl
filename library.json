@@ -1,12 +1,12 @@
 {
   "id": "{25D6279F-66B6-4EC7-8F3F-E572B948E313}",
   "author": "Doijen - FACE Gmbh",
-  "name": "PJLink Projector (Sony/Epson)",
+  "name": "PJLink Projector (Sony/Epson/Panasonic)",
   "url": "https://github.com/JLDFACE/IPSymconPJLinkControl",
   "compatibility": {
     "version": "6.0"
   },
-  "version": "1.0",
-  "build": 7,
-  "date": 20260911
+  "version": "1.1",
+  "build": 8,
+  "date": 20260920
 }

@@ -1,12 +1,19 @@
 <?php
 
 /**
- * PJLink Projector (Sony/Epson) - SymBox-kompatibel (PHP 7.x Stil)
+ * PJLink Projector (Sony/Epson/Panasonic) - SymBox-kompatibel (PHP 7.x Stil)
  *
  * Fix UX:
  * - Input flippt nicht mehr hin und her:
  *   Wenn ein Input-Wechsel pending ist (__CmdInput != 0), überschreibt Poll() die UI-Variable "Input"
  *   nicht mit dem alten Ist-Wert, bis der Projektor die Soll-Quelle erreicht hat.
+ *
+ * Eingänge:
+ * - Die vier klassischen Plätze HDMI 1 / HDMI 2 / HDBaseT / SDI behalten die logischen Werte 1..4,
+ *   damit bestehende Visualisierungen und Skripte unverändert weiterlaufen.
+ * - Jeder weitere Eingang, den das Gerät über INST meldet (z. B. COMPUTER 11, MEMORY VIEWER 41,
+ *   NETWORK 51 beim Panasonic PT-VMZ72), bekommt seinen PJLink-Code als logischen Wert. Codes sind
+ *   immer >= 11 und kollidieren deshalb nie mit den Plätzen 1..4.
  */
 
 class PJLinkProjector extends IPSModule
@@ -17,10 +24,17 @@ class PJLinkProjector extends IPSModule
         parent::Create();
 
         // Properties (Konfig)
-        $this->RegisterPropertyString('Vendor', 'SONY'); // SONY|EPSON
+        $this->RegisterPropertyString('Vendor', 'SONY'); // SONY|EPSON|PANASONIC
         $this->RegisterPropertyString('Host', '192.168.1.50');
         $this->RegisterPropertyInteger('Port', 4352);
         $this->RegisterPropertyString('Password', '');
+
+        // Zusatzfunktionen des PJLink-Standards (bewusst abschaltbar: bestehende
+        // Installationen sollen nach einem Update nicht ungefragt neue Variablen bekommen)
+        $this->RegisterPropertyBoolean('EnableAVMute', false);     // AVMT - Bild/Ton stumm (Shutter)
+        $this->RegisterPropertyBoolean('EnableFreeze', false);     // FREZ - Standbild (nur Class 2)
+        $this->RegisterPropertyBoolean('EnableDiagnostics', false);// LAMP/FILT/ERST/IRES + Geräteinfo
+        $this->RegisterPropertyInteger('DiagInterval', 300);       // Abstand der Diagnose-Abfragen (Sek.)
 
         // Epson Web Control (Helligkeit / Lichtleistung) - nur Epson-Modelle mit Web Control
         $this->RegisterPropertyBoolean('EnableBrightness', false);
@@ -59,13 +73,33 @@ class PJLinkProjector extends IPSModule
         // Fehlermeldungen drosseln (Sekunden, 0 = keine Drosselung)
         $this->RegisterPropertyInteger('ErrorLogCooldown', 60);
 
-        // Vom Gerät gemeldete Eingangsnamen (PJLink Class 2, INNM) als JSON.
+        // Vom Gerät gemeldete Eingangsnamen (PJLink Class 2, INNM) als JSON,
+        // Schlüssel ist der PJLink-Code des Eingangs (z. B. {"31":"HDMI1"}).
         // Attribut statt Property, damit die Namen ein Modul-Update überleben.
+        // Ältere Stände haben hier nach logischem Platz (1..4) abgelegt – das
+        // wandelt MigrateInputNames() beim ersten ApplyChanges um.
         $this->RegisterAttributeString('InputNames', '');
 
         // Eingangsliste des Geräts (PJLink INST) als JSON. Damit lassen sich
         // Hersteller-Defaults prüfen, die es am konkreten Modell nicht gibt.
         $this->RegisterAttributeString('DeviceInputs', '');
+
+        // Welche Werte zuletzt im instanzeigenen Input-Profil standen. Ohne das
+        // bliebe ein Eingang in der Auswahl stehen, den das Gerät nicht mehr meldet.
+        $this->RegisterAttributeString('ProfileValues', '');
+
+        // PJLink-Klasse des Geräts (1 oder 2), 0 = noch nicht ermittelt.
+        // Class-2-Befehle (INNM, FREZ, FILT, IRES, SNUM, SVER) dürfen an einem
+        // Class-1-Gerät gar nicht erst gesendet werden.
+        $this->RegisterAttributeInteger('DeviceClass', 0);
+
+        // Welche AVMT-Variante das Gerät annimmt: 31 = Bild+Ton, 11 = nur Bild,
+        // 21 = nur Ton, 0 = noch unbekannt. Der PT-VMZ72 weist z. B. 11 mit ERR2 ab.
+        $this->RegisterAttributeInteger('AVMuteVariant', 0);
+
+        // Statische Geräteinfo (INF1/INF2/NAME/SNUM/SVER) als JSON – ändert sich
+        // im Betrieb nicht und wird deshalb nur einmal gelesen.
+        $this->RegisterAttributeString('DeviceInfo', '');
 
         // Timer ruft Poll() über Prefix-Funktion auf
         $this->RegisterTimer('PollTimer', 0, 'PJP_Poll($_IPS[\'TARGET\']);');
@@ -86,6 +120,7 @@ class PJLinkProjector extends IPSModule
 
         // Instanzeigenes Profil: die Beschriftung kommt vom Gerät (INNM) und darf
         // andere Instanzen/Anlagen nicht mitverändern.
+        $this->MigrateInputNames();
         $this->EnsureInstanceInputProfile();
         $this->RegisterVariableInteger('Input', 'Projektor Quelle', $this->InputProfileName());
         $this->EnableAction('Input');
@@ -94,6 +129,47 @@ class PJLinkProjector extends IPSModule
 
         // Diagnose
         $this->RegisterVariableString('AvailableInputs', 'Verfügbare Inputs', '');
+
+        // AV-Mute / Shutter (PJLink AVMT) - Class 1, praktisch überall vorhanden
+        if ($this->ReadPropertyBoolean('EnableAVMute')) {
+            $this->RegisterVariableBoolean('AVMute', 'Projektor Bild/Ton stumm', '~Switch');
+            $this->EnableAction('AVMute');
+            @IPS_SetIcon($this->GetIDForIdent('AVMute'), 'Lightbulb');
+        } else {
+            $this->MaybeUnregister('AVMute');
+        }
+
+        // Standbild (PJLink FREZ) - nur Class 2
+        if ($this->ReadPropertyBoolean('EnableFreeze')) {
+            $this->RegisterVariableBoolean('Freeze', 'Projektor Standbild', '~Switch');
+            $this->EnableAction('Freeze');
+            @IPS_SetIcon($this->GetIDForIdent('Freeze'), 'Snowflake');
+        } else {
+            $this->MaybeUnregister('Freeze');
+        }
+
+        // Diagnose: Betriebsstunden, Fehlerstatus, Geräteinfo, Auflösung
+        if ($this->ReadPropertyBoolean('EnableDiagnostics')) {
+            $this->RegisterVariableInteger('LampHours', 'Projektor Betriebsstunden', 'PJP.Hours');
+            $this->RegisterVariableString('LampState', 'Projektor Lichtquelle', '');
+            $this->RegisterVariableInteger('FilterHours', 'Projektor Filterstunden', 'PJP.Hours');
+            $this->RegisterVariableString('ErrorStatus', 'Projektor Fehlerstatus', '');
+            $this->RegisterVariableBoolean('HasFault', 'Projektor Störung', '~Alert');
+            $this->RegisterVariableString('InputResolution', 'Projektor Eingangsauflösung', '');
+            $this->RegisterVariableString('DeviceInfo', 'Projektor Geräteinfo', '');
+
+            @IPS_SetIcon($this->GetIDForIdent('LampHours'), 'Clock');
+            @IPS_SetIcon($this->GetIDForIdent('FilterHours'), 'Clock');
+            @IPS_SetIcon($this->GetIDForIdent('ErrorStatus'), 'Warning');
+            @IPS_SetIcon($this->GetIDForIdent('HasFault'), 'Alert');
+            @IPS_SetIcon($this->GetIDForIdent('InputResolution'), 'Display');
+            @IPS_SetIcon($this->GetIDForIdent('DeviceInfo'), 'Information');
+        } else {
+            foreach (['LampHours', 'LampState', 'FilterHours', 'ErrorStatus',
+                      'HasFault', 'InputResolution', 'DeviceInfo'] as $ident) {
+                $this->MaybeUnregister($ident);
+            }
+        }
 
         // Helligkeit / Lichtleistung (Epson Web Control) - nur wenn aktiviert
         if ($this->ReadPropertyBoolean('EnableBrightness')) {
@@ -218,6 +294,16 @@ class PJLinkProjector extends IPSModule
 
         if ($Ident === 'Input') {
             $this->HandleInputAction((int)$Value);
+            return;
+        }
+
+        if ($Ident === 'AVMute') {
+            $this->SetAVMute((bool)$Value);
+            return;
+        }
+
+        if ($Ident === 'Freeze') {
+            $this->SetFreeze((bool)$Value);
             return;
         }
 
@@ -357,7 +443,7 @@ class PJLinkProjector extends IPSModule
                 // Protokollfehler = das Gerät hat geantwortet, der Sollwert darf stehen
                 // bleiben und der Poll gleicht ab. Nur ein Verbindungsfehler heißt
                 // "nicht zugestellt".
-                $erfolg = !$self->IsTransientPJLinkError($e->getMessage());
+                $erfolg = !$self->IsUndeliveredPJLinkError($e->getMessage());
             }
         });
 
@@ -410,11 +496,114 @@ class PJLinkProjector extends IPSModule
                 $erfolg = true;
             } catch (Exception $e) {
                 $self->HandleImmediateCommandError('Sofort-Input-Befehl', $e);
-                $erfolg = !$self->IsTransientPJLinkError($e->getMessage());
+                $erfolg = !$self->IsUndeliveredPJLinkError($e->getMessage());
             }
         });
 
         return $erfolg || ($gelaufen === false);
+    }
+
+    // ---------- AV-Mute (Shutter) und Standbild ----------
+
+    /**
+     * Bild und Ton stummschalten (PJLink AVMT), per Skript: PJP_SetAVMute($id, true).
+     *
+     * Welche AVMT-Variante ein Gerät annimmt, ist modellabhängig: der Panasonic
+     * PT-VMZ72 kennt 31/30 (Bild+Ton) und 21/20 (nur Ton), weist 11/10 (nur Bild)
+     * aber mit ERR2 ab. Deshalb wird die erste funktionierende Variante gemerkt.
+     */
+    public function SetAVMute($on)
+    {
+        if (!$this->ReadPropertyBoolean('EnableAVMute')) {
+            $this->LogMessage('AV-Mute ist in der Konfiguration nicht aktiviert.', KL_WARNING);
+            return;
+        }
+        if (!$this->HasVariable('AVMute')) {
+            return;
+        }
+
+        $on  = (bool)$on;
+        $alt = (bool)$this->GetValue('AVMute');
+        $this->SetValue('AVMute', $on);
+
+        if (!$this->IsOn()) {
+            // Im Standby nimmt kein Projektor AVMT an – Sollwert zurücknehmen,
+            // sonst zeigt die Visu einen Zustand, den es nie gab.
+            $this->SetValue('AVMute', $alt);
+            return;
+        }
+
+        $self = $this;
+        $erfolg = false;
+        $gelaufen = $this->WithLock('poll', function () use ($self, $on, &$erfolg) {
+            try {
+                $self->PJLinkSetAVMute(
+                    trim($self->ReadPropertyString('Host')),
+                    (int)$self->ReadPropertyInteger('Port'),
+                    (string)$self->ReadPropertyString('Password'),
+                    $on,
+                    2
+                );
+                $erfolg = true;
+            } catch (Exception $e) {
+                $self->HandleImmediateCommandError('AVMT set', $e);
+            }
+        });
+
+        if (!$erfolg && $gelaufen !== false) {
+            $this->SetValue('AVMute', $alt);
+        }
+    }
+
+    /**
+     * Standbild einfrieren (PJLink FREZ, nur Class 2), per Skript: PJP_SetFreeze($id, true).
+     * Viele Geräte antworten mit ERR3, solange am gewählten Eingang kein Signal anliegt.
+     */
+    public function SetFreeze($on)
+    {
+        if (!$this->ReadPropertyBoolean('EnableFreeze')) {
+            $this->LogMessage('Standbild ist in der Konfiguration nicht aktiviert.', KL_WARNING);
+            return;
+        }
+        if (!$this->HasVariable('Freeze')) {
+            return;
+        }
+        // Nur ablehnen, wenn die Klasse bekannt UND zu niedrig ist. Steht sie noch
+        // auf 0 (kein Kontakt gehabt), ruhig senden - das Gerät antwortet dann selbst.
+        if ($this->DeviceClass() === 1) {
+            $this->LogWarningThrottled('Standbild (FREZ) benötigt ein PJLink-Class-2-Gerät.');
+            return;
+        }
+
+        $on  = (bool)$on;
+        $alt = (bool)$this->GetValue('Freeze');
+        $this->SetValue('Freeze', $on);
+
+        if (!$this->IsOn()) {
+            $this->SetValue('Freeze', $alt);
+            return;
+        }
+
+        $self = $this;
+        $erfolg = false;
+        $gelaufen = $this->WithLock('poll', function () use ($self, $on, &$erfolg) {
+            try {
+                $self->PJLinkSetFreeze(
+                    trim($self->ReadPropertyString('Host')),
+                    (int)$self->ReadPropertyInteger('Port'),
+                    (string)$self->ReadPropertyString('Password'),
+                    $on,
+                    2
+                );
+                $erfolg = true;
+            } catch (Exception $e) {
+                $self->HandleImmediateCommandError('FREZ set', $e);
+            }
+        });
+
+        if (!$erfolg && $gelaufen !== false) {
+            $this->SetValue('Freeze', $alt);
+        }
     }
 
     // ---------- Polling / Main ----------
@@ -437,6 +626,9 @@ class PJLinkProjector extends IPSModule
                 // Vorwerte für Change-Detection
                 $prevPowerState   = (int)$self->GetValue('PowerState');
                 $prevInputLogical = (int)$self->GetValue('Input');
+
+                // Vor SetOnlineOk() merken: hatten wir den Projektor überhaupt schon mal?
+                $hatteKontakt = ((int)$self->GetValue('LastOKTimestamp') > 0);
 
                 // Sollwerte
                 $wantDeviceInput  = (int)$self->GetValue('__CmdInput');
@@ -461,8 +653,13 @@ class PJLinkProjector extends IPSModule
                 }
 
                 // Delay-Start bei echtem Power-On: Eintritt in An/Warmup aus Aus (0) oder Cool-down (2)
+                //
+                // Beim allerersten Kontakt steht __LastPwr noch auf 0 ("Aus"), obwohl der
+                // Projektor womöglich längst läuft. Ohne $hatteKontakt startete das Modul
+                // direkt nach dem Anlegen der Instanz einen Input-Delay und schluckte die
+                // erste Quellenumschaltung - genau beim Einrichten am auffälligsten.
                 $last = (int)$self->GetValue('__LastPwr');
-                if (($last === 0 || $last === 2) && ($pwrState === 1 || $pwrState === 3)) {
+                if ($hatteKontakt && ($last === 0 || $last === 2) && ($pwrState === 1 || $pwrState === 3)) {
                     $self->SetValue('__PowerOnTS', time());
                 }
 
@@ -618,10 +815,15 @@ class PJLinkProjector extends IPSModule
                     }
                 }
 
+                // Zusatzfunktionen (AVMT/FREZ/Diagnose) laufen in derselben Sperre,
+                // weil PJLink immer nur eine Sitzung gleichzeitig zulässt.
+                $self->PollExtended($host, $port, $pw, $timeout, $pwrState);
+
             } catch (Exception $e) {
 
-                if ($self->IsTransientPJLinkError($e->getMessage()) && $self->IsLikelyPowerTransition()) {
-                    $self->LogMessage('PJLink transient during power transition.', KL_DEBUG);
+                if ($self->IsTransientPJLinkError($e->getMessage()) && $self->IsLikelyTransition()) {
+                    $self->LogMessage('PJLink-Antwort während eines Übergangs ausgeblieben: '
+                        . $e->getMessage(), KL_DEBUG);
                     $self->SetPollInterval($self->ReadPropertyInteger('PollFast'));
                     return;
                 }
@@ -638,6 +840,197 @@ class PJLinkProjector extends IPSModule
         // Helligkeit/Lichtleistung getrennt aktualisieren (eigener Kanal, darf Poll nie stören)
         $this->PollLight();
         $this->AutoRegulate();
+    }
+
+    /**
+     * Liest die optionalen Zusatzwerte: AV-Mute, Standbild und die Diagnosewerte.
+     *
+     * Läuft innerhalb der Poll-Sperre. Keiner dieser Werte darf den Projektor
+     * offline melden oder den Poll abbrechen - es sind Komfort- und Diagnosedaten,
+     * die je nach Modell und Betriebszustand schlicht fehlen dürfen.
+     */
+    private function PollExtended($host, $port, $pw, $timeout, $pwrState)
+    {
+        $an = ((int)$pwrState === 1);
+
+        // --- AV-Mute (Class 1) ---
+        if ($this->ReadPropertyBoolean('EnableAVMute') && $this->HasVariable('AVMute')) {
+            try {
+                if ($an) {
+                    $mute = $this->PJLinkGetAVMuteOrNull($host, $port, $pw, $timeout);
+                    if ($mute !== null) {
+                        $this->SetValueIfChanged('AVMute', $mute);
+                    }
+                } elseif ((int)$pwrState === 0) {
+                    // Im Standby gibt es keine Stummschaltung
+                    $this->SetValueIfChanged('AVMute', false);
+                }
+            } catch (Exception $e) {
+                $this->LogMessage('AVMT nicht lesbar: ' . $e->getMessage(), KL_DEBUG);
+            }
+        }
+
+        // --- Standbild (Class 2) ---
+        if ($this->ReadPropertyBoolean('EnableFreeze') && $this->HasVariable('Freeze')) {
+            try {
+                if ($an && $this->EnsureDeviceClass($host, $port, $pw, $timeout) >= 2) {
+                    $frez = $this->PJLinkGetFreezeOrNull($host, $port, $pw, $timeout);
+                    if ($frez !== null) {
+                        $this->SetValueIfChanged('Freeze', $frez);
+                    }
+                } elseif ((int)$pwrState === 0) {
+                    $this->SetValueIfChanged('Freeze', false);
+                }
+            } catch (Exception $e) {
+                $this->LogMessage('FREZ nicht lesbar: ' . $e->getMessage(), KL_DEBUG);
+            }
+        }
+
+        // --- Diagnose (gedrosselt) ---
+        if (!$this->ReadPropertyBoolean('EnableDiagnostics') || !$this->HasVariable('ErrorStatus')) {
+            return;
+        }
+
+        $takt = max(30, (int)$this->ReadPropertyInteger('DiagInterval'));
+        $last = (int)$this->GetBuffer('DiagTS');
+        if ($last > 0 && (time() - $last) < $takt) {
+            return;
+        }
+        $this->SetBuffer('DiagTS', (string)time());
+
+        try {
+            $this->ReadDiagnosticsInto($host, $port, $pw, $timeout, $an);
+        } catch (Exception $e) {
+            $this->LogMessage('Diagnose-Abfrage fehlgeschlagen: ' . $e->getMessage(), KL_DEBUG);
+        }
+    }
+
+    private function ReadDiagnosticsInto($host, $port, $pw, $timeout, $an)
+    {
+        $klasse = $this->EnsureDeviceClass($host, $port, $pw, $timeout);
+
+        // Fehlerstatus - auch im Standby aussagekräftig
+        $erst = $this->PJLinkGetErrorStatusOrNull($host, $port, $pw, $timeout);
+        if ($erst !== null) {
+            $this->SetValueIfChanged('ErrorStatus', $this->FormatErrorStatus($erst));
+            $this->SetValueIfChanged('HasFault', (strpos($erst, '1') !== false || strpos($erst, '2') !== false));
+        }
+
+        // Betriebsstunden der Lichtquelle
+        $lampen = $this->PJLinkGetLampsOrNull($host, $port, $pw, $timeout);
+        if ($lampen !== null) {
+            $stunden = [];
+            $zustand = [];
+            foreach ($lampen as $i => $lampe) {
+                $stunden[] = (int)$lampe[0];
+                $zustand[] = (count($lampen) > 1 ? ('Nr. ' . ($i + 1) . ': ') : '')
+                    . ($lampe[1] ? 'an' : 'aus') . ' / ' . (int)$lampe[0] . ' h';
+            }
+            $this->SetValueIfChanged('LampHours', max($stunden));
+            $this->SetValueIfChanged('LampState', implode(', ', $zustand));
+        }
+
+        if ($klasse >= 2) {
+            $filt = $this->PJLinkGetFilterHoursOrNull($host, $port, $pw, $timeout);
+            if ($filt !== null) {
+                $this->SetValueIfChanged('FilterHours', $filt);
+            }
+
+            if ($an) {
+                $ires = $this->PJLinkGetInputResolutionOrNull($host, $port, $pw, $timeout);
+                if ($ires !== null) {
+                    $this->SetValueIfChanged('InputResolution', $ires);
+                }
+            }
+        }
+
+        // Statische Geräteinfo nur einmal holen
+        if (trim((string)$this->ReadAttributeString('DeviceInfo')) === '') {
+            $this->RefreshDeviceInfo($host, $port, $pw, $timeout);
+        } else {
+            $this->SetValueIfChanged('DeviceInfo', $this->FormatDeviceInfo(
+                json_decode((string)$this->ReadAttributeString('DeviceInfo'), true)
+            ));
+        }
+    }
+
+    /**
+     * Liest Hersteller, Modell, Gerätename, Seriennummer und Firmware einmalig
+     * aus und legt sie im Attribut ab. SNUM/SVER gibt es erst ab Class 2.
+     */
+    private function RefreshDeviceInfo($host, $port, $pw, $timeout)
+    {
+        $klasse = $this->EnsureDeviceClass($host, $port, $pw, $timeout);
+
+        $info = [
+            'class'        => $klasse,
+            'manufacturer' => $this->PJLinkGetTextOrNull($host, $port, $pw, '%1INF1', $timeout),
+            'model'        => $this->PJLinkGetTextOrNull($host, $port, $pw, '%1INF2', $timeout),
+            'name'         => $this->PJLinkGetTextOrNull($host, $port, $pw, '%1NAME', $timeout),
+            'other'        => $this->PJLinkGetTextOrNull($host, $port, $pw, '%1INFO', $timeout),
+            'serial'       => ($klasse >= 2) ? $this->PJLinkGetTextOrNull($host, $port, $pw, '%2SNUM', $timeout) : null,
+            'firmware'     => ($klasse >= 2) ? $this->PJLinkGetTextOrNull($host, $port, $pw, '%2SVER', $timeout) : null,
+        ];
+
+        $this->WriteAttributeString('DeviceInfo', json_encode($info));
+
+        if ($this->HasVariable('DeviceInfo')) {
+            $this->SetValueIfChanged('DeviceInfo', $this->FormatDeviceInfo($info));
+        }
+
+        return $info;
+    }
+
+    private function FormatDeviceInfo($info)
+    {
+        if (!is_array($info)) {
+            return '';
+        }
+
+        $kopf = trim((string)($info['manufacturer'] ?? '') . ' ' . (string)($info['model'] ?? ''));
+        if ($kopf === '') {
+            $kopf = 'Unbekanntes Gerät';
+        }
+
+        $teile = [$kopf];
+        if (!empty($info['name']))     $teile[] = 'Name: ' . $info['name'];
+        if (!empty($info['serial']))   $teile[] = 'S/N: ' . $info['serial'];
+        if (!empty($info['firmware'])) $teile[] = 'FW: ' . $info['firmware'];
+        if (!empty($info['other']))    $teile[] = (string)$info['other'];
+        if (!empty($info['class']))    $teile[] = 'PJLink Class ' . (int)$info['class'];
+
+        return implode(' | ', $teile);
+    }
+
+    /** Macht aus den sechs ERST-Stellen einen lesbaren Satz. */
+    private function FormatErrorStatus($erst)
+    {
+        $felder = ['Lüfter', 'Lampe', 'Temperatur', 'Abdeckung', 'Filter', 'Sonstiges'];
+        $stufen = [1 => 'Warnung', 2 => 'Fehler'];
+
+        $meldungen = [];
+        for ($i = 0; $i < 6 && $i < strlen($erst); $i++) {
+            $stufe = (int)$erst[$i];
+            if ($stufe > 0) {
+                $meldungen[] = $felder[$i] . ': ' . ($stufen[$stufe] ?? ('Code ' . $stufe));
+            }
+        }
+
+        return ($meldungen === []) ? 'OK' : implode(', ', $meldungen);
+    }
+
+    /** PJLink-Klasse einmal ermitteln und merken (CLSS ändert sich nie). */
+    private function EnsureDeviceClass($host, $port, $pw, $timeout)
+    {
+        $klasse = $this->DeviceClass();
+        if ($klasse > 0) {
+            return $klasse;
+        }
+
+        $klasse = $this->PJLinkGetClass($host, $port, $pw, $timeout);
+        $this->WriteAttributeInteger('DeviceClass', $klasse);
+
+        return $klasse;
     }
 
     public function RefreshAvailableInputs()
@@ -670,6 +1063,43 @@ class PJLinkProjector extends IPSModule
     }
 
     /**
+     * Liest Hersteller, Modell, Seriennummer und Firmware neu vom Gerät und
+     * liefert sie als lesbare Zeile zurück (PJP_ReadDeviceInfo($id)).
+     */
+    public function ReadDeviceInfo()
+    {
+        $text = '';
+        $self = $this;
+
+        $ok = $this->WithLock('poll', function () use ($self, &$text) {
+            try {
+                $host = trim($self->ReadPropertyString('Host'));
+                if ($host === '') {
+                    throw new Exception('Host ist leer.');
+                }
+
+                $self->WriteAttributeString('DeviceInfo', '');
+                $info = $self->RefreshDeviceInfo(
+                    $host,
+                    (int)$self->ReadPropertyInteger('Port'),
+                    (string)$self->ReadPropertyString('Password'),
+                    2
+                );
+                $text = $self->FormatDeviceInfo($info);
+            } catch (Exception $e) {
+                $self->HandleImmediateCommandError('Geräteinfo-Abfrage', $e);
+                $text = 'Geräteinfo nicht lesbar: ' . $e->getMessage();
+            }
+        });
+
+        if ($ok === false) {
+            return 'Gerät gerade belegt – bitte erneut versuchen.';
+        }
+
+        return $text;
+    }
+
+    /**
      * Liest die verfügbaren Eingänge (INST) und - bei Class-2-Geräten - deren
      * echte Beschriftung (INNM) und schreibt sie ins instanzeigene Profil.
      * Ohne Sperre, muss also innerhalb von WithLock('poll') aufgerufen werden.
@@ -696,10 +1126,11 @@ class PJLinkProjector extends IPSModule
             }
         }
 
-        if ($this->PJLinkGetClass($host, $port, $pw, $timeout) < 2) {
+        if ($this->EnsureDeviceClass($host, $port, $pw, $timeout) < 2) {
             // Class 1 kennt INNM nicht. Leeres Ergebnis festschreiben, sonst
             // fragt der Poll bei jedem Durchlauf erneut nach.
             $this->WriteAttributeString('InputNames', '{}');
+            $this->EnsureInstanceInputProfile();
             return $list;
         }
 
@@ -707,16 +1138,19 @@ class PJLinkProjector extends IPSModule
         // regulären Poll, kommt ein leerer Handshake zurück und PJLinkSend
         // wirft. Das Attribut bleibt dann ungeschrieben und der nächste Poll
         // wiederholt - besser als eine halb beschriftete Belegung einzubrennen.
+        //
+        // Gefragt wird nach JEDEM gemeldeten Eingang, nicht nur nach den vier
+        // klassischen Plätzen - sonst blieben COMPUTER, MEMORY VIEWER & Co. namenlos.
         $names = [];
-        foreach (array_keys($this->DefaultInputNames()) as $logical) {
-            $code = (int)$this->MapInputToDevice($logical);
-            if ($code <= 0 || !in_array($code, $inputs, true)) {
+        foreach ($inputs as $code) {
+            $code = (int)$code;
+            if ($code <= 0) {
                 continue;
             }
 
             $name = $this->PJLinkGetInputNameOrNull($host, $port, $pw, $code, $timeout);
             if ($name !== null) {
-                $names[$logical] = $name;
+                $names[(string)$code] = $name;
             }
         }
 
@@ -724,6 +1158,49 @@ class PJLinkProjector extends IPSModule
         $this->EnsureInstanceInputProfile();
 
         return $list;
+    }
+
+    /**
+     * Ältere Modulstände haben die Eingangsnamen nach logischem Platz (1..4)
+     * abgelegt. Seit der Unterstützung beliebiger Geräteeingänge ist der
+     * PJLink-Code der Schlüssel - das hier zieht den alten Stand einmalig nach.
+     */
+    private function MigrateInputNames()
+    {
+        $roh = trim((string)$this->ReadAttributeString('InputNames'));
+        if ($roh === '' || $roh === '{}') {
+            return;
+        }
+
+        $alt = json_decode($roh, true);
+        if (!is_array($alt) || $alt === []) {
+            return;
+        }
+
+        // Codes sind immer >= 11; ist kein Schlüssel kleiner, liegt schon das neue Format vor.
+        $legacy = false;
+        foreach (array_keys($alt) as $key) {
+            if ((int)$key > 0 && (int)$key <= 10) {
+                $legacy = true;
+                break;
+            }
+        }
+        if (!$legacy) {
+            return;
+        }
+
+        $codes = $this->ResolveInputCodes();
+        $neu = [];
+        foreach ($alt as $key => $name) {
+            $key = (int)$key;
+            $code = ($key <= 10 && isset($codes[$key])) ? (int)$codes[$key] : $key;
+            if ($code > 0 && trim((string)$name) !== '') {
+                $neu[(string)$code] = trim((string)$name);
+            }
+        }
+
+        $this->WriteAttributeString('InputNames', json_encode($neu));
+        $this->LogMessage('Eingangsnamen auf das neue Format (PJLink-Code als Schlüssel) umgestellt.', KL_DEBUG);
     }
 
     private function ApplyLogic($ip, $port, $pw, $timeout, $pwrState, $curDeviceInput)
@@ -972,27 +1449,53 @@ class PJLinkProjector extends IPSModule
     {
         $msg = $e->getMessage();
         if ($this->IsTransientPJLinkError($msg)) {
-            $this->LogMessage($label . ' übersprungen (Projektor nicht bereit/erreichbar).', KL_DEBUG);
+            // Vorübergehend – der nächste Poll gleicht ab. Die Ursache trotzdem
+            // mitschreiben, sonst steht im Debug nur "übersprungen".
+            $this->LogMessage($label . ' übersprungen: ' . $msg, KL_DEBUG);
             return;
         }
 
         $this->LogWarningThrottled($label . ' fehlgeschlagen: ' . $msg);
     }
 
+    /**
+     * Vorübergehende Störung: der Projektor ist da, konnte gerade nur nicht antworten.
+     * Steuert Log-Stufe und die Entscheidung, ob ein Poll auf "offline" geht.
+     */
     private function IsTransientPJLinkError($message)
+    {
+        if (strpos($message, 'Ungültiger PJLink Handshake') === 0) return true;
+        if (strpos($message, 'PJLink Verbindung fehlgeschlagen') === 0) return true;
+        if (strpos($message, 'PJLink Antwort ausgeblieben') === 0) return true;
+        if (strpos($message, 'PJLink gerade nicht auskunftsfähig') === 0) return true;
+        return false;
+    }
+
+    /**
+     * Befehl sicher NICHT angekommen - nur dann darf ein Sofort-Befehl seinen
+     * Sollwert zurücknehmen. Eine ausgebliebene Antwort gehört ausdrücklich nicht
+     * dazu: der Befehl kann durchaus gesessen haben, der Poll gleicht das ab.
+     */
+    private function IsUndeliveredPJLinkError($message)
     {
         if (strpos($message, 'Ungültiger PJLink Handshake') === 0) return true;
         if (strpos($message, 'PJLink Verbindung fehlgeschlagen') === 0) return true;
         return false;
     }
 
-    private function IsLikelyPowerTransition()
+    // Läuft gerade ein Übergang (Power ODER Quellenwechsel)? Während eines
+    // Übergangs sind ausgebliebene Antworten normal und dürfen nicht als
+    // Ausfall im Meldungslog landen.
+    private function IsLikelyTransition()
     {
         $pwrState = (int)$this->GetValue('PowerState');
         $wantOn = (bool)$this->GetValue('__CmdPower');
         if ($pwrState === 2 || $pwrState === 3) return true;
         if ($wantOn && $pwrState === 0) return true;
         if (!$wantOn && $pwrState === 1) return true;
+
+        // Quellenwechsel läuft noch
+        if ((int)$this->GetValue('__CmdInput') !== 0) return true;
 
         $fastAfter = (int)$this->ReadPropertyInteger('FastAfterChange');
         $lastChange = (int)$this->GetValue('__LastChangeTS');
@@ -1005,6 +1508,27 @@ class PJLinkProjector extends IPSModule
         if (strpos($message, '(ERR2)') !== false) return true;
         if (strpos($message, '%1INPT=ERR2') !== false) return true;
         return false;
+    }
+
+    // ---------- Kleine Helfer ----------
+
+    // Projektor voll eingeschaltet (PowerState 1)? Im Gegensatz zu IsPoweredOn()
+    // ohne Meldung im Log - für Abfragen, die im Standby einfach entfallen.
+    private function IsOn()
+    {
+        return (int)$this->GetValue('PowerState') === 1;
+    }
+
+    // Existiert die Variable? Optionale Variablen sind je nach Konfiguration nicht angelegt.
+    private function HasVariable($ident)
+    {
+        return ((int)@$this->GetIDForIdent($ident) > 0);
+    }
+
+    // Zuletzt ermittelte PJLink-Klasse (0 = noch unbekannt)
+    private function DeviceClass()
+    {
+        return (int)$this->ReadAttributeInteger('DeviceClass');
     }
 
     // ---------- Profiles ----------
@@ -1026,6 +1550,13 @@ class PJLinkProjector extends IPSModule
             IPS_SetVariableProfileAssociation('PJP.Input.Logical', 2, 'HDMI 2', '', 0);
             IPS_SetVariableProfileAssociation('PJP.Input.Logical', 3, 'HDBaseT', '', 0);
             IPS_SetVariableProfileAssociation('PJP.Input.Logical', 4, 'SDI', '', 0);
+        }
+
+        // Betriebsstunden (LAMP/FILT)
+        if (!IPS_VariableProfileExists('PJP.Hours')) {
+            IPS_CreateVariableProfile('PJP.Hours', VARIABLETYPE_INTEGER);
+            IPS_SetVariableProfileIcon('PJP.Hours', 'Clock');
+            IPS_SetVariableProfileText('PJP.Hours', '', ' h');
         }
 
         // Zeitstempel als formatierte Zeit anzeigen
@@ -1080,35 +1611,118 @@ class PJLinkProjector extends IPSModule
             IPS_SetVariableProfileIcon($profile, 'TV');
         }
 
-        $names = $this->DefaultInputNames();
+        $auswahl = $this->AllInputChoices();
 
-        $cached = json_decode((string)$this->ReadAttributeString('InputNames'), true);
-        if (is_array($cached)) {
-            foreach ($names as $logical => $fallback) {
-                if (isset($cached[$logical]) && trim((string)$cached[$logical]) !== '') {
-                    $names[$logical] = trim((string)$cached[$logical]);
+        // Was beim letzten Mal drinstand und jetzt wegfällt, muss raus - sonst
+        // bliebe ein Eingang wählbar, den das Gerät gar nicht mehr meldet.
+        $vorher = json_decode((string)$this->ReadAttributeString('ProfileValues'), true);
+        if (is_array($vorher)) {
+            foreach ($vorher as $wert) {
+                if (!isset($auswahl[(int)$wert])) {
+                    IPS_SetVariableProfileAssociation($profile, (int)$wert, '', '', 0);
                 }
             }
         }
 
-        // Eingänge ohne aufgelösten Code (z. B. SDI ohne Hersteller-Default)
-        // erscheinen nicht in der Auswahl - sie ließen sich ohnehin nicht
-        // schalten. Ein leerer Name entfernt eine bereits gesetzte Zuordnung.
-        $codes = $this->ResolveInputCodes();
-
-        foreach ($names as $logical => $name) {
-            $usable = isset($codes[$logical]) && (int)$codes[$logical] > 0;
-            IPS_SetVariableProfileAssociation($profile, $logical, $usable ? $name : '', '', 0);
+        foreach ($auswahl as $logical => $eintrag) {
+            IPS_SetVariableProfileAssociation($profile, (int)$logical, $eintrag['name'], '', 0);
         }
+
+        $this->WriteAttributeString('ProfileValues', json_encode(array_keys($auswahl)));
     }
 
     // ---------- Input Mapping ----------
+
+    /**
+     * Alle wählbaren Eingänge als logischer Wert => ['code' => PJLink-Code, 'name' => Beschriftung].
+     *
+     * Enthält die vier klassischen Plätze (logisch 1..4, für Rückwärtskompatibilität)
+     * und zusätzlich jeden weiteren Eingang, den das Gerät über INST gemeldet hat.
+     * Diese zusätzlichen Eingänge tragen ihren PJLink-Code als logischen Wert; Codes
+     * beginnen bei 11 und kollidieren deshalb nie mit den Plätzen 1..4.
+     */
+    private function AllInputChoices()
+    {
+        $codes     = $this->ResolveInputCodes();
+        $available = $this->KnownDeviceInputs();
+        $namen     = $this->CachedInputNames();
+        $defaults  = $this->DefaultInputNames();
+
+        $auswahl = [];
+        $belegt  = [];
+
+        // 1..4: die klassischen Plätze
+        foreach ($defaults as $logical => $fallback) {
+            $code = isset($codes[$logical]) ? (int)$codes[$logical] : 0;
+            if ($code <= 0) {
+                continue; // kein Code aufgelöst (z. B. SDI ohne Hersteller-Default)
+            }
+            if ($available !== [] && !in_array($code, $available, true)) {
+                continue; // Gerät kennt diesen Eingang nicht
+            }
+
+            $auswahl[$logical] = [
+                'code' => $code,
+                'name' => isset($namen[$code]) ? $namen[$code] : $fallback,
+            ];
+            $belegt[] = $code;
+        }
+
+        // Alles Weitere, was das Gerät meldet - mit dem Code als logischem Wert
+        foreach ($available as $code) {
+            $code = (int)$code;
+            if ($code <= 0 || in_array($code, $belegt, true)) {
+                continue;
+            }
+
+            $auswahl[$code] = [
+                'code' => $code,
+                'name' => isset($namen[$code]) ? $namen[$code] : ('Eingang ' . $code),
+            ];
+            $belegt[] = $code;
+        }
+
+        return $auswahl;
+    }
+
+    /** Vom Gerät gemeldete Eingangsnamen als Code => Name. */
+    private function CachedInputNames()
+    {
+        $roh = json_decode((string)$this->ReadAttributeString('InputNames'), true);
+        if (!is_array($roh)) {
+            return [];
+        }
+
+        $namen = [];
+        foreach ($roh as $code => $name) {
+            $code = (int)$code;
+            $name = trim((string)$name);
+            if ($code > 0 && $name !== '') {
+                $namen[$code] = $name;
+            }
+        }
+
+        return $namen;
+    }
+
     private function MapInputToDevice($logical)
     {
-        $codes = $this->ResolveInputCodes();
         $l = (int)$logical;
 
-        return isset($codes[$l]) ? (int)$codes[$l] : 0;
+        $auswahl = $this->AllInputChoices();
+        if (isset($auswahl[$l])) {
+            return (int)$auswahl[$l]['code'];
+        }
+
+        // Noch nie Kontakt zum Gerät gehabt: auf die Hersteller-Defaults zurückfallen,
+        // damit sich der Projektor auch beim allerersten Befehl schalten lässt.
+        $codes = $this->ResolveInputCodes();
+        if (isset($codes[$l])) {
+            return (int)$codes[$l];
+        }
+
+        // Ein logischer Wert >= 11 ist ein direkt adressierter PJLink-Code.
+        return ($l >= 11) ? $l : 0;
     }
 
     // Eingangsliste, die das Gerät zuletzt über INST gemeldet hat
@@ -1140,10 +1754,16 @@ class PJLinkProjector extends IPSModule
 
         // SDI kennt nur Epson mit einem festen Default (34). Für Sony ist der
         // Code modellabhängig und wird deshalb nicht geraten - dort bleibt der
-        // Eingang aus, bis jemand den Code von Hand setzt.
-        $defaults = ($vendor === 'SONY')
-            ? [1 => 31, 2 => 32, 3 => 36, 4 => 0]
-            : [1 => 32, 2 => 33, 3 => 56, 4 => 34];
+        // Eingang aus, bis jemand den Code von Hand setzt. Panasonic führt
+        // HDBaseT als "DIGITAL LINK" auf Code 33 (geprüft am PT-VMZ72) und hat
+        // in dieser Geräteklasse kein SDI.
+        if ($vendor === 'SONY') {
+            $defaults = [1 => 31, 2 => 32, 3 => 36, 4 => 0];
+        } elseif ($vendor === 'PANASONIC') {
+            $defaults = [1 => 31, 2 => 32, 3 => 33, 4 => 0];
+        } else {
+            $defaults = [1 => 32, 2 => 33, 3 => 56, 4 => 34];
+        }
 
         $overrides = [
             1 => (int)$this->ReadPropertyInteger('CodeHDMI1'),
@@ -1207,6 +1827,14 @@ class PJLinkProjector extends IPSModule
             return 0;
         }
 
+        // Klassische Plätze haben Vorrang, damit bestehende Visus den gewohnten
+        // Wert 1..4 sehen und nicht plötzlich den Gerätecode.
+        foreach ($this->AllInputChoices() as $logical => $eintrag) {
+            if ((int)$eintrag['code'] === $deviceCode) {
+                return (int)$logical;
+            }
+        }
+
         foreach ($this->ResolveInputCodes() as $logical => $code) {
             if ((int)$code === $deviceCode) {
                 return (int)$logical;
@@ -1217,6 +1845,56 @@ class PJLinkProjector extends IPSModule
     }
 
     // ---------- PJLink ----------
+
+    /**
+     * Liest eine PJLink-Zeile.
+     *
+     * Wichtig: PJLink beendet Handshake und Antwort mit CR (0x0D), NICHT mit LF.
+     * fgets() wartet deshalb bei jeder Abfrage bis zum Stream-Timeout, bevor es
+     * die längst vollständige Antwort herausgibt - am Panasonic PT-VMZ72 gemessen
+     * 2 s pro Lesevorgang, also 4 s pro Befehl. Zeichenweise bis zum CR zu lesen
+     * bringt dieselben sechs Abfragen von 24,4 s auf 0,3 s.
+     *
+     * Führende CR/LF werden übersprungen, damit auch Geräte sauber laufen, die
+     * CRLF senden (sonst läge das LF beim nächsten Lesevorgang im Puffer).
+     */
+    private function PJLinkReadLine($fp, $timeoutSec)
+    {
+        $deadline = microtime(true) + max(1, (int)$timeoutSec);
+        $out = '';
+
+        while (microtime(true) < $deadline) {
+            $c = fread($fp, 1);
+
+            if ($c === false) {
+                break;
+            }
+
+            if ($c === '') {
+                $meta = stream_get_meta_data($fp);
+                if (!empty($meta['timed_out']) || feof($fp)) {
+                    break;
+                }
+                usleep(2000);
+                continue;
+            }
+
+            if ($c === "\r" || $c === "\n") {
+                if ($out === '') {
+                    continue; // vorlaufendes Zeilenende überspringen
+                }
+                return $out;
+            }
+
+            $out .= $c;
+            if (strlen($out) >= 512) {
+                break;
+            }
+        }
+
+        return $out;
+    }
+
     private function PJLinkSend($ip, $port, $password, $cmd, $timeoutSec)
     {
         $errno = 0;
@@ -1229,7 +1907,7 @@ class PJLinkProjector extends IPSModule
 
         stream_set_timeout($fp, (int)$timeoutSec);
 
-        $handshake = trim((string)fgets($fp, 512));
+        $handshake = trim($this->PJLinkReadLine($fp, $timeoutSec));
         if (strpos($handshake, 'PJLINK ') !== 0) {
             fclose($fp);
             throw new Exception("Ungültiger PJLink Handshake: '$handshake'");
@@ -1241,11 +1919,18 @@ class PJLinkProjector extends IPSModule
         }
 
         fwrite($fp, $authPrefix . (string)$cmd . "\r");
-        $resp = trim((string)fgets($fp, 512));
+        $resp = trim($this->PJLinkReadLine($fp, $timeoutSec));
         fclose($fp);
 
         if ($resp === 'PJLINK ERRA') {
             throw new Exception('PJLink Authentifizierung fehlgeschlagen (Passwort prüfen).');
+        }
+
+        // Der Panasonic PT-VMZ72 lässt eine Antwort aus, während er eine Quelle
+        // umschaltet. Das ist kein Ausfall - ohne eigene Fehlerklasse landete das
+        // früher als "INPT set unerwartet:" im Log und meldete den Projektor offline.
+        if ($resp === '') {
+            throw new Exception('PJLink Antwort ausgeblieben (Gerät gerade beschäftigt) auf: ' . (string)$cmd);
         }
 
         return $resp;
@@ -1257,6 +1942,17 @@ class PJLinkProjector extends IPSModule
         if (preg_match('/%1POWR=([0-3])/', $r, $m)) {
             return (int)$m[1];
         }
+
+        // Während eines Quellenwechsels antwortet der Panasonic PT-VMZ72 auf POWR?
+        // mit ERR4. Laut Norm ist ERR4 ein Gerätefehler, in der Praxis heißt es hier
+        // "gerade nicht auskunftsfähig". Als Ausfall gewertet erzeugte das bei jedem
+        // Umschalten ein "nicht mehr erreichbar"/"wieder erreichbar"-Paar im Log.
+        // Ein echter Dauerfehler fällt weiterhin auf: er verschwindet nicht wieder
+        // und steht zusätzlich im Fehlerstatus (ERST).
+        if (preg_match('/%1POWR=ERR([34])/', $r, $m)) {
+            throw new Exception('PJLink gerade nicht auskunftsfähig (POWR=ERR' . $m[1] . ').');
+        }
+
         throw new Exception("POWR? unerwartet: $r");
     }
 
@@ -1274,7 +1970,10 @@ class PJLinkProjector extends IPSModule
         if (preg_match('/%1INPT=([0-9]+)/', $r, $m)) {
             return (int)$m[1];
         }
-        if (strpos($r, "%1INPT=ERR3") === 0) {
+        // ERR3/ERR4 = gerade keine Auskunft (z. B. mitten im Umschalten),
+        // ERR1/ERR2 = Gerät kennt die Abfrage nicht. In allen Fällen gilt der
+        // Ist-Input schlicht als unbekannt - das darf keinen Ausfall auslösen.
+        if (preg_match('/%1INPT=ERR[1-4]/', $r)) {
             return null;
         }
         throw new Exception("INPT? unerwartet: $r");
@@ -1291,8 +1990,8 @@ class PJLinkProjector extends IPSModule
             }
             return preg_split('/\s+/', $list);
         }
-        if (strpos($r, "%1INST=ERR3") === 0) {
-            throw new Exception("INST nicht verfügbar (ERR3).");
+        if (preg_match('/%1INST=ERR[34]/', $r)) {
+            throw new Exception('PJLink gerade nicht auskunftsfähig (INST).');
         }
         throw new Exception("INST? unerwartet: $r");
     }
@@ -1320,6 +2019,160 @@ class PJLinkProjector extends IPSModule
                 return null;
             }
             return $name;
+        }
+        return null;
+    }
+
+    // ---- AVMT (Bild/Ton stumm, "Shutter") ----
+
+    /**
+     * Liefert true/false oder null, wenn das Gerät gerade keine Auskunft gibt.
+     * AVMT-Antwort ist zweistellig: 1x = Bild, 2x = Ton, 3x = beides;
+     * die zweite Stelle ist 1 (stumm) oder 0 (normal).
+     */
+    private function PJLinkGetAVMuteOrNull($ip, $port, $pw, $timeout)
+    {
+        $r = $this->PJLinkSend($ip, $port, $pw, '%1AVMT ?', $timeout);
+
+        if (preg_match('/%1AVMT=([123])([01])/', $r, $m)) {
+            return ((int)$m[2] === 1);
+        }
+        if (preg_match('/%1AVMT=ERR[1234]/', $r)) {
+            return null;
+        }
+        throw new Exception("AVMT? unerwartet: $r");
+    }
+
+    private function PJLinkSetAVMute($ip, $port, $pw, $on, $timeout)
+    {
+        $suffix = $on ? '1' : '0';
+
+        // Bereits bekannte Variante zuerst, sonst der Reihe nach probieren.
+        $bekannt = (int)$this->ReadAttributeInteger('AVMuteVariant');
+        $gruppen = ($bekannt > 0) ? [intdiv($bekannt, 10)] : [3, 1, 2];
+
+        $letzte = '';
+        foreach ($gruppen as $gruppe) {
+            $r = $this->PJLinkSend($ip, $port, $pw, '%1AVMT ' . $gruppe . $suffix, $timeout);
+            if (strpos($r, '%1AVMT=OK') === 0) {
+                $this->WriteAttributeInteger('AVMuteVariant', $gruppe * 10 + 1);
+                return;
+            }
+            $letzte = $r;
+            if (strpos($r, '%1AVMT=ERR2') !== 0) {
+                // ERR3/ERR4 heißt "gerade nicht" - andere Gruppen bringen nichts
+                break;
+            }
+        }
+
+        if (strpos($letzte, '%1AVMT=ERR2') === 0) {
+            throw new Exception('AVMT set ungültig (ERR2) – Gerät kennt keine der Varianten 31/11/21.');
+        }
+        if (strpos($letzte, '%1AVMT=ERR3') === 0) {
+            throw new Exception('AVMT set nicht verfügbar (ERR3) – Projektor noch nicht bereit.');
+        }
+        throw new Exception("AVMT set unerwartet: $letzte");
+    }
+
+    // ---- FREZ (Standbild, Class 2) ----
+    private function PJLinkGetFreezeOrNull($ip, $port, $pw, $timeout)
+    {
+        $r = $this->PJLinkSend($ip, $port, $pw, '%2FREZ ?', $timeout);
+
+        if (preg_match('/%2FREZ=([01])\s*$/', $r, $m)) {
+            return ((int)$m[1] === 1);
+        }
+        if (preg_match('/%2FREZ=ERR[1234]/', $r)) {
+            return null;
+        }
+        throw new Exception("FREZ? unerwartet: $r");
+    }
+
+    private function PJLinkSetFreeze($ip, $port, $pw, $on, $timeout)
+    {
+        $r = $this->PJLinkSend($ip, $port, $pw, '%2FREZ ' . ($on ? '1' : '0'), $timeout);
+        if (strpos($r, '%2FREZ=OK') === 0) return;
+        if (strpos($r, '%2FREZ=ERR3') === 0) {
+            throw new Exception('FREZ set nicht verfügbar (ERR3) – meist liegt am Eingang kein Signal an.');
+        }
+        if (strpos($r, '%2FREZ=ERR1') === 0 || strpos($r, '%2FREZ=ERR2') === 0) {
+            throw new Exception('FREZ set abgewiesen – Gerät unterstützt kein Standbild über PJLink.');
+        }
+        throw new Exception("FREZ set unerwartet: $r");
+    }
+
+    // ---- Diagnose ----
+
+    /** ERST: sechs Stellen Lüfter/Lampe/Temperatur/Abdeckung/Filter/Sonstiges, 0=ok 1=Warnung 2=Fehler */
+    private function PJLinkGetErrorStatusOrNull($ip, $port, $pw, $timeout)
+    {
+        $r = $this->PJLinkSend($ip, $port, $pw, '%1ERST ?', $timeout);
+
+        if (preg_match('/%1ERST=([0-2]{6})/', $r, $m)) {
+            return $m[1];
+        }
+        if (preg_match('/%1ERST=ERR[1234]/', $r)) {
+            return null;
+        }
+        throw new Exception("ERST? unerwartet: $r");
+    }
+
+    /** LAMP: je Lampe "Stunden Status", z. B. "1234 1". Liefert [[stunden, an], ...] oder null. */
+    private function PJLinkGetLampsOrNull($ip, $port, $pw, $timeout)
+    {
+        $r = $this->PJLinkSend($ip, $port, $pw, '%1LAMP ?', $timeout);
+
+        if (preg_match('/%1LAMP=([0-9 ]+)/', $r, $m)) {
+            $teile = preg_split('/\s+/', trim($m[1]));
+            $lampen = [];
+            for ($i = 0; $i + 1 < count($teile); $i += 2) {
+                $lampen[] = [(int)$teile[$i], ((int)$teile[$i + 1] === 1)];
+            }
+            return ($lampen === []) ? null : $lampen;
+        }
+        if (preg_match('/%1LAMP=ERR[1234]/', $r)) {
+            return null;
+        }
+        throw new Exception("LAMP? unerwartet: $r");
+    }
+
+    /** FILT: Filter-Betriebsstunden (Class 2). */
+    private function PJLinkGetFilterHoursOrNull($ip, $port, $pw, $timeout)
+    {
+        $r = $this->PJLinkSend($ip, $port, $pw, '%2FILT ?', $timeout);
+
+        if (preg_match('/%2FILT=([0-9]+)/', $r, $m)) {
+            return (int)$m[1];
+        }
+        return null;
+    }
+
+    /** IRES: Auflösung des anliegenden Signals, "-" = kein Signal (Class 2). */
+    private function PJLinkGetInputResolutionOrNull($ip, $port, $pw, $timeout)
+    {
+        $r = $this->PJLinkSend($ip, $port, $pw, '%2IRES ?', $timeout);
+
+        if (preg_match('/%2IRES=(.*)$/', $r, $m)) {
+            $wert = trim($m[1]);
+            if ($wert === '' || preg_match('/^ERR[1-4]$/', $wert)) {
+                return null;
+            }
+            return ($wert === '-') ? 'kein Signal' : $wert;
+        }
+        return null;
+    }
+
+    /** Einfache Textabfrage (NAME, INF1, INF2, INFO, SNUM, SVER). */
+    private function PJLinkGetTextOrNull($ip, $port, $pw, $cmd, $timeout)
+    {
+        $r = $this->PJLinkSend($ip, $port, $pw, $cmd . ' ?', $timeout);
+
+        if (preg_match('/=(.*)$/', $r, $m)) {
+            $wert = trim($m[1]);
+            if ($wert === '' || preg_match('/^ERR[1-4]$/', $wert)) {
+                return null;
+            }
+            return $wert;
         }
         return null;
     }
