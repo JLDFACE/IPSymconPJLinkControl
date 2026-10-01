@@ -63,6 +63,17 @@ $namen = [
     '33' => 'DIGITAL LINK', '41' => 'MEMORY VIEWER', '51' => 'NETWORK',
 ];
 
+// Eigene Eingangsnamen, z. B. --names="32:HDMI1,33:HDMI2,52:LAN" (Epson zaehlt anders als Panasonic)
+if (!empty($opt['names'])) {
+    $namen = [];
+    foreach (explode(',', $opt['names']) as $paar) {
+        $teile = explode(':', $paar, 2);
+        if (count($teile) === 2) {
+            $namen[trim($teile[0])] = trim($teile[1]);
+        }
+    }
+}
+
 // Befehle, die das Geraet gar nicht kennt - antwortet mit ERR1 wie ein aelteres Modell
 $unsupported = [];
 if (!empty($opt['unsupported'])) {

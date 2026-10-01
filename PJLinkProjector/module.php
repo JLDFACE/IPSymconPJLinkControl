@@ -101,6 +101,9 @@ class PJLinkProjector extends IPSModule
         // im Betrieb nicht und wird deshalb nur einmal gelesen.
         $this->RegisterAttributeString('DeviceInfo', '');
 
+        // Reicht die Epson Web Control native Setzbefehle durch? 0 unbekannt, 1 ja, 2 nein.
+        $this->RegisterAttributeInteger('EpsonNativeSet', 0);
+
         // Timer ruft Poll() über Prefix-Funktion auf
         $this->RegisterTimer('PollTimer', 0, 'PJP_Poll($_IPS[\'TARGET\']);');
 
@@ -368,7 +371,9 @@ class PJLinkProjector extends IPSModule
         $logical = (int)$logical;
         $deviceCode = $this->MapInputToDevice($logical);
         if ($deviceCode === 0) {
-            $this->LogMessage('Input Mapping ist 0 (Codes prüfen).', KL_WARNING);
+            // Kommt praktisch nur aus Skripten: die Visu bietet nur an, was es gibt.
+            $this->LogWarningThrottled('Eingang ' . $logical . ' gibt es an diesem Projektor nicht '
+                . '(gemeldet: ' . (string)$this->GetValue('AvailableInputs') . ').');
             return;
         }
 
@@ -1113,10 +1118,39 @@ class PJLinkProjector extends IPSModule
         $list = implode(' ', $inputs);
         $this->SetValue('AvailableInputs', $list);
 
-        // Eingangsliste merken, bevor die Codes aufgelöst werden - erst damit
-        // kann ResolveInputCodes() einen Default verwerfen, den es nicht gibt.
+        // Erst alles vom Gerät holen, dann zuordnen: ResolveInputCodes() braucht
+        // Eingangsliste UND Namen, um einen fehlenden Hersteller-Default richtig zu
+        // ersetzen. Mit der Liste allein lag die erste Meldung nach dem Einrichten
+        // daneben (z. B. "HDMI 2 -> SDI" an einem Epson ohne 33).
+        //
+        // Class 1 kennt INNM nicht - dann ein leeres Ergebnis festschreiben, sonst
+        // fragt der Poll bei jedem Durchlauf erneut nach.
+        //
+        // PJLink erlaubt nur eine Sitzung: kollidiert die Abfrage mit dem regulären
+        // Poll, kommt ein leerer Handshake zurück und PJLinkSend wirft. Dann bleiben
+        // beide Attribute unverändert und der nächste Poll wiederholt - besser als
+        // eine halb beschriftete Belegung einzubrennen.
+        //
+        // Gefragt wird nach JEDEM gemeldeten Eingang, nicht nur nach den vier
+        // klassischen Plätzen - sonst blieben COMPUTER, MEMORY VIEWER & Co. namenlos.
+        $names = [];
+        if ($this->EnsureDeviceClass($host, $port, $pw, $timeout) >= 2) {
+            foreach ($inputs as $code) {
+                $code = (int)$code;
+                if ($code <= 0) {
+                    continue;
+                }
+
+                $name = $this->PJLinkGetInputNameOrNull($host, $port, $pw, $code, $timeout);
+                if ($name !== null) {
+                    $names[(string)$code] = $name;
+                }
+            }
+        }
+
         $before = $this->ResolveInputCodes();
         $this->WriteAttributeString('DeviceInputs', json_encode($inputs));
+        $this->WriteAttributeString('InputNames', ($names === []) ? '{}' : json_encode($names));
         $after = $this->ResolveInputCodes();
 
         foreach ($after as $logical => $code) {
@@ -1129,35 +1163,6 @@ class PJLinkProjector extends IPSModule
             }
         }
 
-        if ($this->EnsureDeviceClass($host, $port, $pw, $timeout) < 2) {
-            // Class 1 kennt INNM nicht. Leeres Ergebnis festschreiben, sonst
-            // fragt der Poll bei jedem Durchlauf erneut nach.
-            $this->WriteAttributeString('InputNames', '{}');
-            $this->EnsureInstanceInputProfile();
-            return $list;
-        }
-
-        // PJLink erlaubt nur eine Sitzung: kollidiert die Abfrage mit dem
-        // regulären Poll, kommt ein leerer Handshake zurück und PJLinkSend
-        // wirft. Das Attribut bleibt dann ungeschrieben und der nächste Poll
-        // wiederholt - besser als eine halb beschriftete Belegung einzubrennen.
-        //
-        // Gefragt wird nach JEDEM gemeldeten Eingang, nicht nur nach den vier
-        // klassischen Plätzen - sonst blieben COMPUTER, MEMORY VIEWER & Co. namenlos.
-        $names = [];
-        foreach ($inputs as $code) {
-            $code = (int)$code;
-            if ($code <= 0) {
-                continue;
-            }
-
-            $name = $this->PJLinkGetInputNameOrNull($host, $port, $pw, $code, $timeout);
-            if ($name !== null) {
-                $names[(string)$code] = $name;
-            }
-        }
-
-        $this->WriteAttributeString('InputNames', json_encode($names));
         $this->EnsureInstanceInputProfile();
 
         return $list;
@@ -1448,7 +1453,7 @@ class PJLinkProjector extends IPSModule
         }
     }
 
-    private function HandleImmediateCommandError($label, Exception $e)
+    private function HandleImmediateCommandError($label, Throwable $e)
     {
         $msg = $e->getMessage();
         if ($this->IsTransientPJLinkError($msg)) {
@@ -1577,6 +1582,7 @@ class PJLinkProjector extends IPSModule
         IPS_SetVariableProfileAssociation('PJP.LightMode', 0, 'Hoch (Normal)', '', 0);
         IPS_SetVariableProfileAssociation('PJP.LightMode', 1, 'Eco', '', 0);
         IPS_SetVariableProfileAssociation('PJP.LightMode', 2, 'Mittel', '', 0);
+        IPS_SetVariableProfileAssociation('PJP.LightMode', 4, 'Erweitert', '', 0); // EB-L265F
         IPS_SetVariableProfileAssociation('PJP.LightMode', 5, 'Custom', '', 0);
 
         // Lichtleistungs-Pegel (Epson LUMLEVEL) 0..250 als Slider
@@ -1717,6 +1723,13 @@ class PJLinkProjector extends IPSModule
             return (int)$auswahl[$l]['code'];
         }
 
+        // Kennt das Modul die Eingangsliste, ist die Auswahl oben vollständig: was dort
+        // fehlt, gibt es am Gerät nicht (z. B. HDBaseT am EB-L265F). Dann nichts senden,
+        // statt einen Code zu raten.
+        if ($this->KnownDeviceInputs() !== []) {
+            return 0;
+        }
+
         // Noch nie Kontakt zum Gerät gehabt: auf die Hersteller-Defaults zurückfallen,
         // damit sich der Projektor auch beim allerersten Befehl schalten lässt.
         $codes = $this->ResolveInputCodes();
@@ -1806,11 +1819,43 @@ class PJLinkProjector extends IPSModule
             // Gleiche PJLink-Gruppe: 1x RGB, 2x Video, 3x Digital, 4x Storage, 5x Netzwerk
             $group = intdiv($code, 10);
 
+            // Ersatz nur innerhalb der Digitalgruppe 3x. Dort sind die Codes gleichartig
+            // (HDMI/DVI/HDBaseT/SDI) - genau dafür ist das hier da: der Sony VPL-FHZ80
+            // führt HDBaseT auf 33 statt 36. In den anderen Gruppen stehen völlig
+            // verschiedene Quellen nebeneinander. Epson legt HDBaseT auf 56 in die
+            // Netzwerkgruppe; der EB-L265F hat kein HDBaseT, dafür 52 = LAN - ein
+            // Gruppen-Ersatz hätte "LAN" auf den HDBaseT-Platz gelegt. Ohne Ersatz
+            // entfällt der Platz, und 52 erscheint mit eigenem Wert und Namen.
+            if ($group !== 3) {
+                continue;
+            }
+
+            // Was das Gerät über INNM von sich sagt, entscheidet mit. Die PJLink-Gruppe
+            // allein reicht nicht: auch in 3x stehen HDMI, HDBaseT und SDI nebeneinander.
+            // An einem Epson ohne 33 griff sich der HDMI-2-Platz sonst den SDI-Eingang.
+            //  - Nennt das Gerät einen Eingang eindeutig als andere Schnittstelle,
+            //    kommt er auf diesen Platz nicht.
+            //  - Neutrale Namen ("InputC" beim Sony) oder gar keine Namen (Class 1)
+            //    bleiben erlaubt - sonst ginge der Sony-Fall 36 -> 33 verloren.
+            //  - SDI nur bei ausdrücklichem SDI-Namen. Ein beliebiger Digitaleingang
+            //    ist kein SDI; das hält auch einen Epson ohne 34 (EB-PU2216 ungeprüft)
+            //    sauber, solange er SDI beim Namen nennt.
+            $slotArt = $this->SlotKind((int)$logical);
+            $namen   = $this->CachedInputNames();
+
             foreach ($available as $candidate) {
                 if (intdiv($candidate, 10) !== $group) {
                     continue;
                 }
                 if (in_array($candidate, $taken, true)) {
+                    continue;
+                }
+
+                $art = $this->InputKind(isset($namen[$candidate]) ? $namen[$candidate] : '');
+                if ($slotArt === 'SDI' && $art !== 'SDI') {
+                    continue;
+                }
+                if ($art !== '' && $art !== $slotArt) {
                     continue;
                 }
 
@@ -1821,6 +1866,30 @@ class PJLinkProjector extends IPSModule
         }
 
         return $codes;
+    }
+
+    /** Welche Schnittstelle ein klassischer Platz meint. */
+    private function SlotKind($logical)
+    {
+        $arten = [1 => 'HDMI', 2 => 'HDMI', 3 => 'HDBT', 4 => 'SDI'];
+        return isset($arten[(int)$logical]) ? $arten[(int)$logical] : '';
+    }
+
+    /**
+     * Schnittstellenart aus dem Gerätenamen eines Eingangs, '' = nicht erkennbar.
+     * Reihenfolge zählt: "HDBaseT" enthält kein "HDMI", "3G-SDI" kein "HDMI" -
+     * aber erst prüfen, was am spezifischsten ist.
+     */
+    private function InputKind($name)
+    {
+        $n = strtoupper((string)$name);
+        if ($n === '') return '';
+        if (strpos($n, 'SDI') !== false) return 'SDI';
+        if (strpos($n, 'HDBASE') !== false || strpos($n, 'HDBT') !== false
+            || strpos($n, 'DIGITAL LINK') !== false || strpos($n, 'DIGITALLINK') !== false) return 'HDBT';
+        if (strpos($n, 'HDMI') !== false) return 'HDMI';
+        if (strpos($n, 'DVI') !== false) return 'DVI';
+        return '';
     }
 
     private function UnmapInputToLogical($deviceCode)
@@ -2262,14 +2331,14 @@ class PJLinkProjector extends IPSModule
     private function ApplyLightMode($mode)
     {
         $mode = (int)$mode;
-        if (!in_array($mode, [0, 1, 2, 5], true)) {
+        if (!in_array($mode, [0, 1, 2, 4, 5], true)) {
             $this->LogMessage('Ungültiger Lichtleistungs-Modus: ' . $mode, KL_WARNING);
             return;
         }
         try {
-            $this->EpsonWebSet('_OSD_LUMINANCE=' . sprintf('%02d', $mode));
+            $this->EpsonWebSet('LUMINANCE', sprintf('%02d', $mode));
             $this->SetValue('LightMode', $mode);
-        } catch (Exception $e) {
+        } catch (Throwable $e) {
             $this->HandleImmediateCommandError('LUMINANCE set', $e);
         }
     }
@@ -2282,12 +2351,12 @@ class PJLinkProjector extends IPSModule
         try {
             // Der numerische Pegel wirkt nur im Custom-Modus (05) -> ggf. automatisch aktivieren
             if ((int)$this->GetValue('LightMode') !== 5) {
-                $this->EpsonWebSet('_OSD_LUMINANCE=05');
+                $this->EpsonWebSet('LUMINANCE', '05');
                 $this->SetValue('LightMode', 5);
             }
-            $this->EpsonWebSet('_OSD_LUMLEVEL=' . $level);
+            $this->EpsonWebSet('LUMLEVEL', (string)$level);
             $this->SetValue('LightLevel', $level);
-        } catch (Exception $e) {
+        } catch (Throwable $e) {
             $this->HandleImmediateCommandError('LUMLEVEL set', $e);
         }
     }
@@ -2361,7 +2430,7 @@ class PJLinkProjector extends IPSModule
 
         try {
             $this->ApplyLightLevel($target); // ohne MarkManualOverride -> keine Selbst-Pause
-        } catch (Exception $e) {
+        } catch (Throwable $e) {
             $this->LogMessage('Auto-Regelung fehlgeschlagen: ' . $e->getMessage(), KL_DEBUG);
         }
     }
@@ -2464,20 +2533,71 @@ class PJLinkProjector extends IPSModule
         return null;
     }
 
-    private function EpsonWebSet($param)
+    /**
+     * Setzt einen Epson-Wert, z. B. EpsonWebSet('LUMLEVEL', '150').
+     *
+     * Bevorzugt den nativen ESC/VP21-Befehl über json_query ("LUMLEVEL 150"): der
+     * Projektor quittiert mit SUCCESS oder ERR, das Ergebnis ist also überprüfbar.
+     * Der alte Weg über directsend?_OSD_LUMLEVEL=150 (am QS100 erprobt) lieferte am
+     * EB-L265F Zufallswerte - 150 ergab Pegel 0, 100 ergab 247 - und meldet nie
+     * einen Fehler. Er bleibt nur als Rückfall für Geräte, deren Web Control keine
+     * Setzbefehle durchreicht.
+     */
+    private function EpsonWebSet($cmd, $value)
     {
-        $eq = strpos($param, '=');
-        if ($eq === false) {
-            $query = rawurlencode($param);
-        } else {
-            $query = rawurlencode(substr($param, 0, $eq)) . '=' . rawurlencode(substr($param, $eq + 1));
+        $cmd = (string)$cmd;
+        $value = (string)$value;
+
+        if ($this->EpsonNativeSetSupported()) {
+            $antwort = $this->EpsonWebGet($cmd . ' ' . $value);
+            if ($antwort === 'ERR') {
+                throw new Exception('Projektor lehnt ' . $cmd . ' ' . $value . ' ab (Wert gibt es an diesem Modell nicht).');
+            }
+            if ($antwort === null) {
+                throw new Exception('Epson Web Control: keine verwertbare Antwort auf ' . $cmd . ' ' . $value . '.');
+            }
+            return true;
         }
-        $this->EpsonWebRequest('/cgi-bin/directsend', $query);
+
+        $this->EpsonWebRequest('/cgi-bin/directsend',
+            rawurlencode('_OSD_' . $cmd) . '=' . rawurlencode($value));
         return true;
+    }
+
+    /**
+     * Reicht die Web Control native Setzbefehle durch? Einmal ermitteln und merken.
+     * Probe: den Lichtmodus auf genau den Wert setzen, den er gerade hat - ein
+     * garantiert gültiger Befehl, der nichts verändert.
+     */
+    private function EpsonNativeSetSupported()
+    {
+        $stand = (int)$this->ReadAttributeInteger('EpsonNativeSet'); // 0 unbekannt, 1 ja, 2 nein
+        if ($stand > 0) {
+            return $stand === 1;
+        }
+
+        $mode = $this->EpsonWebGet('LUMINANCE?');
+        if ($mode === null || $mode === 'ERR' || !preg_match('/^\d+$/', $mode)) {
+            return false; // nicht entscheidbar - diesmal der alte Weg, nichts festschreiben
+        }
+
+        $r = $this->EpsonWebGet('LUMINANCE ' . $mode);
+        $ok = ($r !== null && $r !== 'ERR');
+        $this->WriteAttributeInteger('EpsonNativeSet', $ok ? 1 : 2);
+        $this->LogMessage('Epson Web Control: Setzbefehle ' . ($ok ? 'nativ (ESC/VP21)' : 'über OSD-Weg') . '.', KL_DEBUG);
+
+        return $ok;
     }
 
     private function EpsonWebRequest($path, $query)
     {
+        // Ohne curl wäre der Aufruf ein PHP-Error statt einer Exception und schlüge an
+        // allen catch(Exception) vorbei: die Helligkeitsaktion endete in einem Fatal
+        // Error, mit Auto-Helligkeit sogar jeder Poll. Deshalb vorab sauber melden.
+        if (!function_exists('curl_init')) {
+            throw new Exception('Epson Web Control braucht die PHP-Erweiterung curl – auf diesem System nicht vorhanden.');
+        }
+
         $host = trim($this->ReadPropertyString('Host'));
         if ($host === '') throw new Exception('Host ist leer.');
 

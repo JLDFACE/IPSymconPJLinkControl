@@ -63,6 +63,13 @@ if ($extras) {
     $m->TestSetProperty('EnableDiagnostics', true);
     $m->TestSetProperty('DiagInterval', 30);
 }
+// Epson Web Control (Lichtleistung): --webpassword=... [--webuser=EPSONWEB]
+if (isset($opt['webpassword'])) {
+    $m->TestSetProperty('EnableBrightness', true);
+    $m->TestSetProperty('WebUser', $opt['webuser'] ?? 'EPSONWEB');
+    $m->TestSetProperty('WebPassword', $opt['webpassword']);
+    $m->TestSetProperty('AutoBrightnessEnable', false);
+}
 
 titel('Konfiguration');
 zeile('Host', $host);
@@ -127,6 +134,23 @@ if (isset($opt['avmute'])) {
     sleep(1);
     $m->Poll();
     zeile('AVMute (nach Poll)', $m->GetValue('AVMute'));
+}
+
+// Lichtleistung: --lightmode=<0|1|2|5> und/oder --lightlevel=<0..250>
+if (isset($opt['lightmode']) || isset($opt['lightlevel'])) {
+    titel('Lichtleistung');
+    zeile('vorher Modus', $m->GetValue('LightMode'));
+    zeile('vorher Pegel', $m->GetValue('LightLevel'));
+    if (isset($opt['lightmode'])) {
+        $m->RequestAction('LightMode', (int)$opt['lightmode']);
+        zeile('Modus gesetzt', (int)$opt['lightmode']);
+    }
+    if (isset($opt['lightlevel'])) {
+        $m->RequestAction('LightLevel', (int)$opt['lightlevel']);
+        zeile('Pegel gesetzt', (int)$opt['lightlevel']);
+    }
+    zeile('nachher Modus', $m->GetValue('LightMode'));
+    zeile('nachher Pegel', $m->GetValue('LightLevel'));
 }
 
 if (isset($opt['freeze'])) {

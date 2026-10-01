@@ -86,7 +86,17 @@ Meldet das Gerät einen Eingang nicht mehr, verschwindet er aus der Auswahl.
 ### Default-Inputcodes
 
 Die Codes unten gelten nur, solange das Gerät noch nichts Eigenes gemeldet hat. Steht der Default
-nicht in der Geräteliste, sucht das Modul einen freien Eingang derselben PJLink-Gruppe.
+nicht in der Geräteliste, sucht das Modul einen Ersatz – aber vorsichtig:
+
+- **Nur in der Digitalgruppe 3x.** In den anderen PJLink-Gruppen stehen ganz verschiedene Quellen
+  nebeneinander. Epson legt HDBaseT auf 56 in die Netzwerkgruppe; der EB-L265F hat kein HDBaseT,
+  dafür 52 = LAN. Ein Gruppen-Ersatz hätte „LAN" auf den HDBaseT-Platz gelegt.
+- **Nicht gegen den Gerätenamen.** Nennt das Gerät einen Eingang eindeutig als andere Schnittstelle
+  (HDMI, HDBaseT/DIGITAL LINK, SDI, DVI), kommt er auf keinen fremden Platz.
+- **SDI nur bei ausdrücklichem SDI-Namen.** Ein beliebiger Digitaleingang ist kein SDI.
+
+Findet sich kein passender Ersatz, entfällt der Platz. Der Eingang selbst bleibt trotzdem wählbar,
+dann unter seinem PJLink-Code.
 
 **Sony**
 - HDMI 1: 31
@@ -202,13 +212,23 @@ neue Variablen bekommen.
 PJLink kennt keinen Helligkeitsbefehl. Für Epson-Modelle mit **Epson Web Control** steuert das Modul
 die Laser-Lichtleistung deshalb über deren HTTP-API:
 
-- **Lesen:** `GET /cgi-bin/json_query?jsoncallback=<CMD>`
-- **Schreiben:** `GET /cgi-bin/directsend?_OSD_<PARAM>=<wert>`
+- **Lesen:** `GET /cgi-bin/json_query?jsoncallback=<CMD>?`
+- **Schreiben:** `GET /cgi-bin/json_query?jsoncallback=<CMD> <wert>` – der native ESC/VP21-Befehl,
+  den der Projektor mit `SUCCESS` oder `ERR` quittiert. Ältere Web-Control-Stände ohne diese
+  Durchreiche bekommen den alten Weg `GET /cgi-bin/directsend?_OSD_<CMD>=<wert>`. Welcher Weg
+  greift, ermittelt das Modul einmal selbst, indem es den Lichtmodus auf seinen aktuellen Wert setzt.
 - **Auth:** HTTP-Digest (`Web-Control Benutzer`/`Passwort`) mit Pflicht-`Referer` (CSRF-Schutz)
 
-Verwendete Kommandos: `LUMINANCE` (Modus `00`=Hoch, `01`=Eco, `02`=Mittel, `05`=Custom) und
-`LUMLEVEL` (numerischer Pegel `0–250`, nur im Custom-Modus wirksam). Beim Setzen eines Pegels wird
-automatisch in den Custom-Modus gewechselt.
+Verwendete Kommandos: `LUMINANCE` (Modus `00`=Hoch, `01`=Eco, `02`=Mittel, `04`=Erweitert,
+`05`=Custom) und `LUMLEVEL` (numerischer Pegel `0–250`, nur im Custom-Modus wirksam). Beim Setzen
+eines Pegels wird automatisch in den Custom-Modus gewechselt.
+
+Welche Modi es gibt, hängt vom Modell ab. Der EB-L265F kennt `00`, `01`, `04` und `05`, lehnt `02`
+ab. Einen abgelehnten Modus meldet das Modul als Warnung, der angezeigte Wert bleibt der echte.
+Den Pegel rundet der EB-L265F intern: 200 wird zu 198, 250 zu 247.
+
+Der alte OSD-Weg taugt nicht für alle Geräte: am EB-L265F ergab `directsend?_OSD_LUMLEVEL=150`
+Pegel 0 und `=100` Pegel 247 – ohne Fehlermeldung. Deshalb der native Befehl.
 
 Der Status wird gedrosselt (höchstens alle 12 s, nur wenn der Projektor an ist) im normalen Poll
 mitgelesen und stört den PJLink-Betrieb nicht.
@@ -344,7 +364,8 @@ CRLF-Zeilenenden, abgelehnte `AVMT`-Varianten und ausbleibende Antworten.
 |-------|--------|-----------|
 | Panasonic PT-VMZ72 | Class 2 | Power, alle sechs Eingänge, AV-Mute, Diagnose live geprüft. `FREZ` nur mit anliegendem Signal, `AVMT 11` wird abgewiesen. |
 | Sony VPL-FHZ80 | Class 2 | HDBaseT liegt auf 33 statt 36 |
-| Epson QS100 | Class 2 | zusätzlich Lichtleistung über Epson Web Control |
+| Epson QS100 | Class 2 | zusätzlich Lichtleistung über Epson Web Control (alter OSD-Weg, mit dem nativen Befehl noch nicht erneut geprüft) |
+| Epson EB-L265F | Class 2 | PJLink mit Passwort, elf Eingänge, kein HDBaseT/SDI, AV-Mute, Diagnose, Lichtleistung über den nativen Befehl live geprüft. Meldet beim Umschalten `POWR=ERR3`. |
 
 ---
 

@@ -292,6 +292,126 @@ try {
     stoppeProjektor($p);
 }
 
+// ---------------------------------------------------------------- Epson ohne HDBaseT
+abschnitt('Epson EB-L265F: kein HDBaseT (56), dafuer LAN (52) - kein falscher Ersatz');
+// Belegung und Namen genau so, wie der echte EB-L265F sie meldet
+$p = starteProjektor([
+    'inputs' => '11 12 21 32 33 41 44 52 53 57 58',
+    'input'  => '32',
+    'names'  => '11:Computer1,12:Computer2,21:Video,32:HDMI1,33:HDMI2,41:USB,44:Spotlight,'
+              . '52:LAN,53:USB Display,57:Screen Mirroring1,58:Screen Mirroring2',
+]);
+try {
+    $m = neuesModul($p['port'], ['Vendor' => 'EPSON']);
+    $m->ApplyChanges();
+    $m->Poll();
+
+    $profil = profilVon($m);
+    pruefe('HDBaseT-Platz entfaellt', !isset($profil[3]), $profil[3] ?? '');
+    pruefe('SDI-Platz entfaellt', !isset($profil[4]), $profil[4] ?? '');
+    gleich('HDMI 1 auf Platz 1 (Epson 32)', 'HDMI1', $profil[1] ?? '');
+    gleich('HDMI 2 auf Platz 2 (Epson 33)', 'HDMI2', $profil[2] ?? '');
+    pruefe('LAN mit eigenem Wert 52', isset($profil[52]), implode(',', array_keys($profil)));
+    gleich('Alle elf Geraeteeingaenge waehlbar', 11, count($profil));
+    gleich('Ist-Eingang 32 als Platz 1', 1, $m->GetValue('Input'));
+
+    // Ein Skript, das noch "3 = HDBaseT" schickt, darf nicht auf LAN schalten
+    IPSKernel::$log = [];
+    $m->RequestAction('Input', 3);
+    $m->Poll();
+    gleich('Platz 3 schaltet nichts um', 1, $m->GetValue('Input'));
+    gleich('Kein Sollwert haengen geblieben', 0, $m->GetValue('__CmdInput'));
+    pruefe('Hinweis, dass es den Eingang nicht gibt',
+        count(array_filter(IPSKernel::$log, function ($z) {
+            return strpos($z, 'gibt es an diesem Projektor nicht') !== false;
+        })) === 1, implode(' | ', IPSKernel::$log));
+
+    $m->RequestAction('Input', 52);
+    $m->Poll();
+    gleich('Auf LAN (52) direkt schaltbar', 52, $m->GetValue('Input'));
+} finally {
+    stoppeProjektor($p);
+}
+
+abschnitt('Epson mit SDI (Art EB-PU2216): SDI auf 34 oder auf anderem Code');
+foreach ([['34', 'SDI auf dem Epson-Standard 34'], ['35', 'SDI auf abweichendem Code 35']] as $fall) {
+    list($sdi, $titel) = $fall;
+    $p = starteProjektor([
+        'inputs' => "11 32 $sdi 56",
+        'input'  => '32',
+        'names'  => "11:Computer,32:HDMI,$sdi:SDI,56:HDBaseT",
+    ]);
+    try {
+        $m = neuesModul($p['port'], ['Vendor' => 'EPSON']);
+        $m->ApplyChanges();
+        $m->Poll();
+        $profil = profilVon($m);
+        gleich("$titel: Platz 4 heisst SDI", 'SDI', $profil[4] ?? '');
+        gleich("$titel: Platz 3 ist HDBaseT (56)", 'HDBaseT', $profil[3] ?? '');
+        pruefe("$titel: SDI nicht doppelt", !isset($profil[(int)$sdi]));
+        pruefe("$titel: HDMI-2-Platz greift nicht nach SDI", !isset($profil[2]), $profil[2] ?? '');
+
+        $m->RequestAction('Input', 4);
+        $m->Poll();
+        gleich("$titel: Platz 4 schaltet auf SDI", 4, $m->GetValue('Input'));
+        gleich("$titel: Sollwert abgearbeitet", 0, $m->GetValue('__CmdInput'));
+    } finally {
+        stoppeProjektor($p);
+    }
+}
+
+abschnitt('Sony-Fall bleibt: HDBaseT 36 fehlt, 33 springt ein (Digitalgruppe)');
+$p = starteProjektor(['inputs' => '31 32 33']);
+try {
+    $m = neuesModul($p['port'], ['Vendor' => 'SONY']);
+    $m->ApplyChanges();
+    $m->Poll();
+    $profil = profilVon($m);
+    pruefe('Platz 3 belegt', isset($profil[3]), implode(',', array_keys($profil)));
+    gleich('Platz 3 ist Code 33', 'DIGITAL LINK', $profil[3] ?? '');
+    pruefe('33 nicht doppelt als eigener Wert', !isset($profil[33]));
+} finally {
+    stoppeProjektor($p);
+}
+
+// ---------------------------------------------------------------- Web Control nicht erreichbar
+// Laeuft der Test ohne curl (portables PHP ohne php.ini), prueft das genau den Fall
+// "Plattform ohne curl". Mit curl scheitert die Anfrage an 127.0.0.1:80 - fuer das
+// Modul derselbe Fall: Helligkeit geht nicht, alles andere muss weiterlaufen.
+abschnitt('Lichtleistung ohne erreichbare Web Control (bzw. ohne curl): kein Absturz');
+$p = starteProjektor(['input' => '32']);
+try {
+    $m = neuesModul($p['port'], [
+        'Vendor' => 'EPSON', 'EnableBrightness' => true,
+        'WebUser' => 'EPSONWEB', 'WebPassword' => 'x',
+        'AutoBrightnessEnable' => true,
+    ]);
+    $sensor = IPSKernel::makeVariable(300.0);
+    $m->TestSetProperty('AmbientVariableID', $sensor);
+    $m->ApplyChanges();
+
+    $absturz = '';
+    try {
+        $m->Poll();
+        $m->Poll();
+        $m->RequestAction('LightLevel', 200);
+        $m->RequestAction('LightMode', 1);
+    } catch (Throwable $e) {
+        $absturz = get_class($e) . ': ' . $e->getMessage();
+    }
+    gleich('Kein Absturz bei Poll und Helligkeitsaktion', '', $absturz);
+    gleich('Projektor bleibt online', true, $m->GetValue('Online'));
+    gleich('Kein PJLink-Fehler vermerkt', '', $m->GetValue('LastError'));
+    gleich('Quelle weiterhin gelesen', 1, $m->GetValue('Input'));
+
+    // Nebenbefund: Epson-Voreinstellung (SDI = 34) an einem Geraet ohne 34, aber mit freiem 31
+    $profil = profilVon($m);
+    pruefe('Freies HDMI (31) landet nicht auf dem SDI-Platz', !isset($profil[4]), $profil[4] ?? '');
+    pruefe('31 bleibt als eigener Eingang waehlbar', isset($profil[31]));
+} finally {
+    stoppeProjektor($p);
+}
+
 // ---------------------------------------------------------------- Kann nichts davon
 abschnitt('Geraet kennt keine der Zusatzfunktionen - darf keine Fehler schreiben');
 $p = starteProjektor(['unsupported' => 'AVMT,FREZ,ERST,LAMP,FILT,IRES,SNUM,SVER,INNM']);
