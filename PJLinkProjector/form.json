@@ -36,8 +36,9 @@
     { "type": "CheckBox", "name": "EnableDiagnostics", "caption": "Diagnose: Betriebsstunden, Fehlerstatus, Geräteinfo, Auflösung" },
     { "type": "NumberSpinner", "name": "DiagInterval", "caption": "Abstand der Diagnose-Abfragen (Sek.)", "minimum": 30, "maximum": 86400 },
 
-    { "type": "Label", "caption": "Helligkeit / Lichtleistung über Epson Web Control (nur Epson-Modelle mit aktivierter Web-API):" },
+    { "type": "Label", "caption": "Epson Web Control (nur Epson-Modelle mit aktivierter Web-API): Lichtleistung und Betriebswerte" },
     { "type": "CheckBox", "name": "EnableBrightness", "caption": "Lichtleistungs-Steuerung aktivieren" },
+    { "type": "CheckBox", "name": "EnableEpsonStatus", "caption": "Betriebswerte lesen: Lufttemperatur, Gerätestunden, Epson-Fehlercode (Takt wie Diagnose)" },
     { "type": "ValidationTextBox", "name": "WebUser", "caption": "Web-Control Benutzer (Standard: EPSONWEB)" },
     { "type": "PasswordTextBox", "name": "WebPassword", "caption": "Web-Control Passwort" },
     { "type": "CheckBox", "name": "WebHTTPS", "caption": "HTTPS statt HTTP verwenden" },

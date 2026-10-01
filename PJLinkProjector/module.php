@@ -36,6 +36,10 @@ class PJLinkProjector extends IPSModule
         $this->RegisterPropertyBoolean('EnableDiagnostics', false);// LAMP/FILT/ERST/IRES + Geräteinfo
         $this->RegisterPropertyInteger('DiagInterval', 300);       // Abstand der Diagnose-Abfragen (Sek.)
 
+        // Epson-Betriebswerte über Web Control: Lufttemperatur, Gerätestunden, Fehlercode.
+        // Nutzt dieselben Web-Control-Zugangsdaten wie die Lichtleistung, ist aber unabhängig davon.
+        $this->RegisterPropertyBoolean('EnableEpsonStatus', false);
+
         // Epson Web Control (Helligkeit / Lichtleistung) - nur Epson-Modelle mit Web Control
         $this->RegisterPropertyBoolean('EnableBrightness', false);
         $this->RegisterPropertyString('WebUser', 'EPSONWEB');
@@ -170,6 +174,19 @@ class PJLinkProjector extends IPSModule
         } else {
             foreach (['LampHours', 'LampState', 'FilterHours', 'ErrorStatus',
                       'HasFault', 'InputResolution', 'DeviceInfo'] as $ident) {
+                $this->MaybeUnregister($ident);
+            }
+        }
+
+        // Epson-Betriebswerte (Web Control) - nur wenn aktiviert
+        if ($this->ReadPropertyBoolean('EnableEpsonStatus')) {
+            $this->RegisterVariableFloat('EpsonAirTemp', 'Projektor Lufttemperatur', '~Temperature');
+            $this->RegisterVariableInteger('EpsonOperatingHours', 'Projektor Gerätestunden', 'PJP.Hours');
+            $this->RegisterVariableString('EpsonErrorCode', 'Projektor Epson-Fehlercode', '');
+            @IPS_SetIcon($this->GetIDForIdent('EpsonOperatingHours'), 'Clock');
+            @IPS_SetIcon($this->GetIDForIdent('EpsonErrorCode'), 'Warning');
+        } else {
+            foreach (['EpsonAirTemp', 'EpsonOperatingHours', 'EpsonErrorCode'] as $ident) {
                 $this->MaybeUnregister($ident);
             }
         }
@@ -844,6 +861,7 @@ class PJLinkProjector extends IPSModule
 
         // Helligkeit/Lichtleistung getrennt aktualisieren (eigener Kanal, darf Poll nie stören)
         $this->PollLight();
+        $this->PollEpsonStatus();
         $this->AutoRegulate();
     }
 
@@ -2471,6 +2489,109 @@ class PJLinkProjector extends IPSModule
 
     // Liest Modus + Pegel aus der Web Control und aktualisiert die Variablen.
     // Darf den normalen PJLink-Betrieb niemals stören (eigenes try/catch, gedrosselt).
+    // ---------- Epson-Betriebswerte (Web Control, ESC/VP21) ----------
+
+    /**
+     * Liest Lufttemperatur (TEMP?), Gerätestunden (ONTIME?) und Fehlercode (ERR?).
+     *
+     * Eigener Kanal über HTTP, außerhalb der PJLink-Sperre, gedrosselt auf den
+     * Diagnose-Takt. Nichts davon darf den Projektor offline melden oder eine
+     * Warnung schreiben: kennt das Gerät eine Abfrage nicht, bleibt der Wert stehen.
+     */
+    private function PollEpsonStatus()
+    {
+        if (!$this->ReadPropertyBoolean('EnableEpsonStatus') || !$this->HasVariable('EpsonAirTemp')) {
+            return;
+        }
+        if (!(bool)$this->GetValue('Online')) {
+            return;
+        }
+
+        $takt = max(30, (int)$this->ReadPropertyInteger('DiagInterval'));
+        $last = (int)$this->GetBuffer('EpsonStatusTS');
+        if ($last > 0 && (time() - $last) < $takt) {
+            return;
+        }
+        $this->SetBuffer('EpsonStatusTS', (string)time());
+
+        $this->ReadEpsonStatusInto();
+    }
+
+    /** Ungedrosselt lesen, z. B. per PJP_ReadEpsonStatus($id). */
+    public function ReadEpsonStatus()
+    {
+        if (!$this->ReadPropertyBoolean('EnableEpsonStatus')) {
+            $this->LogMessage('Epson-Betriebswerte sind in der Konfiguration nicht aktiviert.', KL_WARNING);
+            return;
+        }
+        $this->SetBuffer('EpsonStatusTS', (string)time());
+        $this->ReadEpsonStatusInto();
+    }
+
+    private function ReadEpsonStatusInto()
+    {
+        try {
+            $temp = $this->ParseEpsonAirTemp($this->EpsonWebGet('TEMP?'));
+            if ($temp !== null) {
+                $this->SetValueIfChanged('EpsonAirTemp', $temp);
+            }
+
+            $stunden = $this->EpsonWebGet('ONTIME?');
+            if ($stunden !== null && preg_match('/^\d+$/', $stunden)) {
+                $this->SetValueIfChanged('EpsonOperatingHours', (int)$stunden);
+            }
+
+            $err = $this->EpsonWebGet('ERR?');
+            if ($err !== null && preg_match('/^[0-9A-Fa-f]{2}$/', $err)) {
+                $this->SetValueIfChanged('EpsonErrorCode', $this->FormatEpsonError($err));
+            }
+        } catch (Throwable $e) {
+            $this->LogMessage('Epson-Betriebswerte nicht lesbar: ' . $e->getMessage(), KL_DEBUG);
+        }
+    }
+
+    /**
+     * Lufttemperatur aus dem Rohblock von TEMP?, z. B.
+     * "31 2F XX 4C 6A 56 5A 62 70 52 4C XX @ 7C 50 78 7E 55 @ 02 01".
+     *
+     * Der erste Hexwert ist die Lufttemperatur in halben Grad: 0x31 = 49 -> 24,5 °C.
+     * Abgeglichen am EB-L265F mit Epson Projector Management ("Air Temp."): der
+     * Rohwert sprang nur zwischen 0x31 und 0x32, das Tool zeigte 24,5 und 25,0 °C.
+     * Die übrigen Werte bewegen sich ebenfalls, sind aber nicht zugeordnet.
+     */
+    private function ParseEpsonAirTemp($reply)
+    {
+        if ($reply === null || $reply === 'ERR') {
+            return null;
+        }
+        $teile = preg_split('/\s+/', trim((string)$reply));
+        if (!isset($teile[0]) || !preg_match('/^[0-9A-Fa-f]{2}$/', $teile[0])) {
+            return null; // "XX" = Fühler liefert gerade nichts
+        }
+        return hexdec($teile[0]) / 2.0;
+    }
+
+    /**
+     * Epson-Fehlercode (ERR?) lesbar machen. Der Code bleibt immer sichtbar; Klartext
+     * gibt es nur für die Codes, die in der ESC/VP21-Referenz eindeutig sind.
+     */
+    private function FormatEpsonError($code)
+    {
+        $code = strtoupper((string)$code);
+        $texte = [
+            '00' => 'kein Fehler',
+            '01' => 'Lüfterfehler',
+            '03' => 'Lichtquelle zündet nicht',
+            '04' => 'Innentemperatur zu hoch',
+            '06' => 'Lichtquellenfehler',
+            '07' => 'Abdeckung offen',
+            '0C' => 'Luftstrom zu gering',
+        ];
+        return isset($texte[$code])
+            ? ($code . ' – ' . $texte[$code])
+            : ($code . ' – siehe Epson-Handbuch');
+    }
+
     private function PollLight()
     {
         if (!$this->ReadPropertyBoolean('EnableBrightness')) return;

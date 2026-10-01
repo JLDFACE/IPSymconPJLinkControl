@@ -64,8 +64,10 @@ if ($extras) {
     $m->TestSetProperty('DiagInterval', 30);
 }
 // Epson Web Control (Lichtleistung): --webpassword=... [--webuser=EPSONWEB]
+// --epsonstatus liest zusaetzlich Lufttemperatur, Geraetestunden, Fehlercode
 if (isset($opt['webpassword'])) {
     $m->TestSetProperty('EnableBrightness', true);
+    $m->TestSetProperty('EnableEpsonStatus', isset($opt['epsonstatus']));
     $m->TestSetProperty('WebUser', $opt['webuser'] ?? 'EPSONWEB');
     $m->TestSetProperty('WebPassword', $opt['webpassword']);
     $m->TestSetProperty('AutoBrightnessEnable', false);

@@ -133,6 +133,7 @@ neue Variablen bekommen.
 | Eigenschaft | Beschreibung |
 |------------|--------------|
 | Lichtleistungs-Steuerung aktivieren | Schaltet die Helligkeits-Funktion frei (legt die Variablen an) |
+| Betriebswerte lesen | Lufttemperatur, Gerätestunden und Epson-Fehlercode (Takt wie die Diagnose) |
 | Web-Control Benutzer | Benutzername der Epson Web Control (Standard: `EPSONWEB`) |
 | Web-Control Passwort | Passwort der Epson Web Control |
 | HTTPS statt HTTP verwenden | Zugriff über Port 443 statt 80 (selbstsigniertes Zertifikat wird akzeptiert) |
@@ -175,6 +176,9 @@ neue Variablen bekommen.
 | HasFault³ | Boolean | Mindestens eine Warnung oder ein Fehler liegt an |
 | InputResolution³ | String | Auflösung des anliegenden Signals (nur Class 2) |
 | DeviceInfo³ | String | Hersteller, Modell, Name, Seriennummer, Firmware, Klasse |
+| EpsonAirTemp⁶ | Float | Lufttemperatur in °C, halbgradgenau |
+| EpsonOperatingHours⁶ | Integer | Betriebsstunden des Geräts (nicht der Lichtquelle) |
+| EpsonErrorCode⁶ | String | Epson-Fehlercode mit Klartext, z. B. „00 – kein Fehler" |
 | LightMode⁴ | Integer | Lichtleistungs-Modus: Hoch / Eco / Mittel / Custom |
 | LightLevel⁴ | Integer | Lichtleistungs-Pegel 0–250 (nur im Custom-Modus wirksam) |
 | AutoBrightness⁵ | Boolean | Laufzeit-Schalter der automatischen Raumhelligkeits-Regelung |
@@ -183,7 +187,8 @@ neue Variablen bekommen.
 ² nur wenn *Standbild* aktiviert ist  
 ³ nur wenn *Diagnose* aktiviert ist  
 ⁴ nur wenn *Lichtleistungs-Steuerung* aktiviert ist  
-⁵ nur wenn zusätzlich *Auto-Helligkeit* aktiviert ist
+⁵ nur wenn zusätzlich *Auto-Helligkeit* aktiviert ist  
+⁶ nur wenn *Betriebswerte lesen* aktiviert ist (Epson Web Control)
 
 ### Interne Variablen (versteckt)
 
@@ -242,6 +247,29 @@ mitgelesen und stört den PJLink-Betrieb nicht.
 
 > Aufrufe dieser Funktionen bzw. eine manuelle Änderung der Variablen gelten als **Handbedienung**
 > und pausieren die automatische Regelung für die konfigurierte Dauer.
+
+---
+
+## Epson-Betriebswerte (Web Control)
+
+Über dieselbe Web Control liest das Modul auf Wunsch drei Werte, die PJLink nicht kennt:
+
+| Wert | Epson-Abfrage | Bemerkung |
+|------|---------------|-----------|
+| Lufttemperatur | `TEMP?` | erster Wert des Rohblocks, in halben Grad: `0x31` = 24,5 °C |
+| Gerätestunden | `ONTIME?` | Betriebsstunden des Projektors; die Stunden der Lichtquelle liefert PJLink |
+| Fehlercode | `ERR?` | `00` = kein Fehler; Klartext nur für eindeutig dokumentierte Codes |
+
+`TEMP?` liefert einen undokumentierten Block mit 17 Messwerten. Zugeordnet ist bisher nur der
+erste: am EB-L265F abgeglichen mit der Anzeige „Air Temp." in Epson Projector Management. Der
+Rohwert sprang dabei nur zwischen `0x31` und `0x32`, das Tool zeigte 24,5 und 25,0 °C. Die übrigen
+Werte bewegen sich ebenfalls, ihre Bedeutung ist offen.
+
+**Im Standby** beantwortet der EB-L265F `TEMP?` und `ERR?` mit `ERR`; die Variablen behalten dann
+ihren letzten Wert. `ONTIME?` antwortet auch im Standby.
+
+Kennt ein Gerät eine dieser Abfragen nicht, bleibt der Wert stehen. Es gibt dafür keine Warnung
+und keine Offline-Meldung. `PJP_ReadEpsonStatus($id)` liest sofort, ohne Drosselung.
 
 ---
 

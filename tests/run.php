@@ -538,6 +538,29 @@ gleich('Offline erkannt', false, $m->GetValue('Online'));
 pruefe('Fehler vermerkt', $m->GetValue('LastError') !== '', $m->GetValue('LastError'));
 gleich('Fehlerzaehler hochgezaehlt', 1, $m->GetValue('ErrorCounter'));
 
+// ---------------------------------------------------------------- Epson-Rohwerte
+abschnitt('Epson TEMP?/ERR? auswerten (Werte vom EB-L265F)');
+IPSKernel::reset();
+$m = new PJLinkProjector();
+$m->Create();
+$temp = new ReflectionMethod($m, 'ParseEpsonAirTemp');
+$temp->setAccessible(true);
+$fehler = new ReflectionMethod($m, 'FormatEpsonError');
+$fehler->setAccessible(true);
+
+// Abgleich mit Epson Projector Management: 0x31 -> 24,5 °C, 0x32 -> 25,0 °C
+gleich('0x31 = 24,5 °C', 24.5, $temp->invoke($m, '31 2F XX 4C 4A 4A 58 62 5A 54 4B XX @ 41 36 4B 55 49 @ 02 06 '));
+gleich('0x32 = 25,0 °C', 25.0, $temp->invoke($m, '32 2E XX 4C 4A 4A 58 62 5A 54 4B XX @ 41 36 4B 55 49 @ 02 06'));
+gleich('Fuehler ohne Wert (XX) ergibt nichts', null, $temp->invoke($m, 'XX 2E XX 4C'));
+gleich('ERR ergibt nichts', null, $temp->invoke($m, 'ERR'));
+gleich('Keine Antwort ergibt nichts', null, $temp->invoke($m, null));
+gleich('Leere Antwort ergibt nichts', null, $temp->invoke($m, ''));
+
+gleich('ERR 00', '00 – kein Fehler', $fehler->invoke($m, '00'));
+gleich('ERR 04', '04 – Innentemperatur zu hoch', $fehler->invoke($m, '04'));
+gleich('ERR 0c klein geschrieben', '0C – Luftstrom zu gering', $fehler->invoke($m, '0c'));
+gleich('Unbekannter Code bleibt sichtbar', '2A – siehe Epson-Handbuch', $fehler->invoke($m, '2A'));
+
 // ---------------------------------------------------------------- Fazit
 echo PHP_EOL . str_repeat('=', 60) . PHP_EOL;
 printf("%d bestanden, %d gefallen\n", $bestanden, $gefallen);
