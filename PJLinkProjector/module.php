@@ -45,6 +45,15 @@ class PJLinkProjector extends IPSModule
         $this->RegisterPropertyString('WebUser', 'EPSONWEB');
         $this->RegisterPropertyString('WebPassword', '');
         $this->RegisterPropertyBoolean('WebHTTPS', false);
+        $this->RegisterPropertyInteger('WebPort', 0); // 0 = Standard (80 bzw. 443)
+
+        // Objektivsteuerung über die Epson Web Control: Zoom, Fokus, Lens-Shift, Objektivspeicher.
+        // Die Bereiche von Zoom und Fokus hängen vom Objektiv ab und lassen sich nicht abfragen
+        // (die Web Control trägt sie erst im Browser ein). 0 = unbekannt: dann gibt es statt
+        // eines Reglers ein Eingabefeld, das Gerät begrenzt selbst.
+        $this->RegisterPropertyBoolean('EnableLens', false);
+        $this->RegisterPropertyInteger('LensZoomMax', 0);
+        $this->RegisterPropertyInteger('LensFocusMax', 0);
 
         // Automatische Anpassung an Raumhelligkeit (KNX-Lux -> Lichtleistung)
         $this->RegisterPropertyBoolean('AutoBrightnessEnable', false);
@@ -107,6 +116,15 @@ class PJLinkProjector extends IPSModule
 
         // Reicht die Epson Web Control native Setzbefehle durch? 0 unbekannt, 1 ja, 2 nein.
         $this->RegisterAttributeInteger('EpsonNativeSet', 0);
+
+        // Objektivspeicher: Belegung und Namen der Plätze als JSON ({"1":{"used":true,"name":"Saal"}}).
+        // Attribut, damit die Beschriftung ein Modul-Update überlebt (Destroy räumt Instanzprofile ab).
+        $this->RegisterAttributeString('LensMemorySlots', '');
+
+        // Wirkung von INC je Shift-Achse: 1 hebt den Wert, -1 senkt ihn ({"LensShiftH":-1}).
+        // Hängt von der Projektionsart ab - am PU2216B im SKUZ senkt INC den Wert, obwohl
+        // die Web Control es andersherum annimmt. Deshalb gelernt statt vorausgesetzt.
+        $this->RegisterAttributeString('LensShiftDir', '');
 
         // Timer ruft Poll() über Prefix-Funktion auf
         $this->RegisterTimer('PollTimer', 0, 'PJP_Poll($_IPS[\'TARGET\']);');
@@ -220,6 +238,30 @@ class PJLinkProjector extends IPSModule
             $this->MaybeUnregister('AutoBrightness');
         }
 
+        // Objektivsteuerung (Epson Web Control) - nur wenn aktiviert
+        if ($this->ReadPropertyBoolean('EnableLens')) {
+            $this->EnsureLensProfiles();
+
+            $this->RegisterVariableInteger('LensZoom', 'Objektiv Zoom', $this->LensProfileName('Zoom'));
+            $this->RegisterVariableInteger('LensFocus', 'Objektiv Fokus', $this->LensProfileName('Focus'));
+            $this->RegisterVariableInteger('LensShiftH', 'Objektiv Shift horizontal', 'PJP.LensShift');
+            $this->RegisterVariableInteger('LensShiftV', 'Objektiv Shift vertikal', 'PJP.LensShift');
+            $this->RegisterVariableInteger('LensMemory', 'Objektivspeicher laden', $this->LensProfileName('Memory'));
+
+            foreach (['LensZoom', 'LensFocus', 'LensShiftH', 'LensShiftV', 'LensMemory'] as $ident) {
+                $this->EnableAction($ident);
+            }
+            @IPS_SetIcon($this->GetIDForIdent('LensZoom'), 'Move');
+            @IPS_SetIcon($this->GetIDForIdent('LensFocus'), 'Eyes');
+            @IPS_SetIcon($this->GetIDForIdent('LensShiftH'), 'HollowDoubleArrowRight');
+            @IPS_SetIcon($this->GetIDForIdent('LensShiftV'), 'HollowDoubleArrowUp');
+            @IPS_SetIcon($this->GetIDForIdent('LensMemory'), 'Database');
+        } else {
+            foreach (['LensZoom', 'LensFocus', 'LensShiftH', 'LensShiftV', 'LensMemory'] as $ident) {
+                $this->MaybeUnregister($ident);
+            }
+        }
+
         // Interner Merker: Automatik pausiert bis (Unix-TS) nach manueller Änderung
         $this->RegisterVariableInteger('__AutoPausedUntil', '__Auto Paused Until', '');
         IPS_SetHidden($this->GetIDForIdent('__AutoPausedUntil'), true);
@@ -302,6 +344,11 @@ class PJLinkProjector extends IPSModule
 
         // Helligkeitswerte einmal initial aus dem Gerät ziehen (falls aktiviert & an)
         $this->RefreshLightNow();
+
+        // Objektivpositionen ebenso (nur wenn aktiviert & an)
+        if ($this->ReadPropertyBoolean('EnableLens') && $this->IsOn()) {
+            $this->ReadLensInto();
+        }
     }
 
     // ---------- Actions ----------
@@ -334,6 +381,31 @@ class PJLinkProjector extends IPSModule
 
         if ($Ident === 'LightLevel') {
             $this->SetLightLevel((int)$Value);
+            return;
+        }
+
+        if ($Ident === 'LensZoom') {
+            $this->SetLensZoom((int)$Value);
+            return;
+        }
+
+        if ($Ident === 'LensFocus') {
+            $this->SetLensFocus((int)$Value);
+            return;
+        }
+
+        if ($Ident === 'LensShiftH') {
+            $this->SetLensShiftH((int)$Value);
+            return;
+        }
+
+        if ($Ident === 'LensShiftV') {
+            $this->SetLensShiftV((int)$Value);
+            return;
+        }
+
+        if ($Ident === 'LensMemory') {
+            $this->LoadLensMemory((int)$Value);
             return;
         }
 
@@ -862,6 +934,7 @@ class PJLinkProjector extends IPSModule
         // Helligkeit/Lichtleistung getrennt aktualisieren (eigener Kanal, darf Poll nie stören)
         $this->PollLight();
         $this->PollEpsonStatus();
+        $this->PollLens();
         $this->AutoRegulate();
     }
 
@@ -2641,6 +2714,500 @@ class PJLinkProjector extends IPSModule
         }
     }
 
+    // ---------- Epson Web Control: Objektiv ----------
+    // Befehle wie die Objektiv-Seite der Web Control selbst (lenscontrol.js, lensshift.js,
+    // memory.js), am EB-PU2216B nachvollzogen:
+    //   Lesen  json_query  IMZOOM? / IMFOCUS? / IMHLENS? / IMLENS?  -> "Position Status"
+    //   Zoom/Fokus absolut      directsend IMZOOM=<wert> / IMFOCUS=<wert>
+    //   Lens-Shift relativ      directsend IMHLENS=INC <n> / IMLENS=DEC <n> (Ziel - Ist)
+    //   Speicher                directsend POPLP=<n> laden, PUSHLP=<n> speichern, NAMELP=<n> <hex>
+    // Achtung: ZOOM?/ZOOM INC ist das digitale E-Zoom, nicht der optische Zoom.
+
+    // Variable => [Abfrage, Befehl]
+    private function LensAxes()
+    {
+        return [
+            'LensZoom'   => ['IMZOOM?',  'IMZOOM'],
+            'LensFocus'  => ['IMFOCUS?', 'IMFOCUS'],
+            'LensShiftH' => ['IMHLENS?', 'IMHLENS'],
+            'LensShiftV' => ['IMLENS?',  'IMLENS'],
+        ];
+    }
+
+    // So lange zeigt die Variable nach einem Stellbefehl das Ziel, auch wenn das
+    // Objektiv noch fährt. Danach gilt wieder, was das Gerät meldet - ein Ziel, das
+    // es nicht erreicht (außerhalb des Bereichs), bleibt so nicht stehen.
+    const LENS_PENDING_SECONDS = 20;
+
+    // Plätze des Objektivspeichers (NAMELP? 1..9 antworten, 0 und 10 nicht)
+    const LENS_MEMORY_SLOTS = 9;
+
+    // Erste Shift-Fahrt bei unbekannter Richtung: so weit vorfahren und schauen, wohin es
+    // geht. 5 Counts sind im Bild nicht zu sehen, liegen aber sicher über dem Leserauschen.
+    const LENS_SHIFT_PROBE = 5;
+
+    private function LensProfileName($kind)
+    {
+        return 'PJP.Lens' . $kind . '.' . $this->InstanceID;
+    }
+
+    private function EnsureLensProfiles()
+    {
+        foreach (['Zoom' => 'LensZoomMax', 'Focus' => 'LensFocusMax'] as $kind => $prop) {
+            $name = $this->LensProfileName($kind);
+            if (!IPS_VariableProfileExists($name)) {
+                IPS_CreateVariableProfile($name, VARIABLETYPE_INTEGER);
+            }
+            // max 0 = Bereich unbekannt -> kein Regler, sondern Eingabefeld
+            IPS_SetVariableProfileValues($name, 0, max(0, (int)$this->ReadPropertyInteger($prop)), 1);
+        }
+
+        // Lens-Shift: 16 Bit, Mitte 32768 (lensshift.js). Den tatsächlich zulässigen
+        // Bereich begrenzt das Objektiv selbst.
+        if (!IPS_VariableProfileExists('PJP.LensShift')) {
+            IPS_CreateVariableProfile('PJP.LensShift', VARIABLETYPE_INTEGER);
+        }
+        IPS_SetVariableProfileValues('PJP.LensShift', 0, 65535, 1);
+
+        $this->EnsureLensMemoryProfile();
+    }
+
+    private function EnsureLensMemoryProfile()
+    {
+        $name = $this->LensProfileName('Memory');
+        if (!IPS_VariableProfileExists($name)) {
+            IPS_CreateVariableProfile($name, VARIABLETYPE_INTEGER);
+        }
+        foreach ($this->LensMemoryLabels() as $slot => $label) {
+            IPS_SetVariableProfileAssociation($name, $slot, $label, '', -1);
+        }
+    }
+
+    /** Beschriftung je Platz aus dem gemerkten Stand; leere Plätze sind als leer markiert. */
+    private function LensMemoryLabels()
+    {
+        $info = json_decode((string)$this->ReadAttributeString('LensMemorySlots'), true);
+        if (!is_array($info)) {
+            $info = [];
+        }
+
+        $labels = [];
+        for ($slot = 1; $slot <= self::LENS_MEMORY_SLOTS; $slot++) {
+            $label = 'Speicher ' . $slot;
+            if (isset($info[$slot])) {
+                $name = trim((string)($info[$slot]['name'] ?? ''));
+                if ($name !== '') {
+                    $label = $slot . ': ' . $name;
+                }
+                if (empty($info[$slot]['used'])) {
+                    $label .= ' (leer)';
+                }
+            }
+            $labels[$slot] = $label;
+        }
+        return $labels;
+    }
+
+    // Öffentliche Setter -> PJP_SetLensZoom($id, 120) usw.
+    public function SetLensZoom(int $Value)
+    {
+        $this->MoveLensAbsolute('LensZoom', $Value);
+    }
+
+    public function SetLensFocus(int $Value)
+    {
+        $this->MoveLensAbsolute('LensFocus', $Value);
+    }
+
+    public function SetLensShiftH(int $Value)
+    {
+        $this->MoveLensShift('LensShiftH', $Value);
+    }
+
+    public function SetLensShiftV(int $Value)
+    {
+        $this->MoveLensShift('LensShiftV', $Value);
+    }
+
+    /** Objektivpositionen sofort lesen, z. B. per PJP_RefreshLens($id). */
+    public function RefreshLens()
+    {
+        if (!$this->ReadPropertyBoolean('EnableLens') || !$this->IsOn()) {
+            return;
+        }
+        $this->SetBuffer('LensPollTS', (string)time());
+        $this->ReadLensInto();
+    }
+
+    // Objektiv nur bei voll eingeschaltetem Projektor ansprechen - im Standby
+    // beantwortet die Web Control jede Objektivabfrage mit ERR.
+    private function LensReady()
+    {
+        if (!$this->ReadPropertyBoolean('EnableLens')) {
+            $this->LogMessage('Objektivsteuerung ist in der Konfiguration nicht aktiviert.', KL_WARNING);
+            return false;
+        }
+        if (!$this->IsOn()) {
+            $this->LogMessage('Objektivbefehl bei ausgeschaltetem Projektor ignoriert (PowerState='
+                . (int)$this->GetValue('PowerState') . ').', KL_NOTIFY);
+            return false;
+        }
+        return true;
+    }
+
+    private function MoveLensAbsolute($ident, $value)
+    {
+        if (!$this->LensReady()) {
+            return;
+        }
+        $value = max(0, (int)$value);
+        $axes = $this->LensAxes();
+
+        try {
+            $this->EpsonDirectSend($axes[$ident][1], (string)$value);
+            $this->MarkLensPending($ident, $value);
+        } catch (Throwable $e) {
+            $this->HandleImmediateCommandError($axes[$ident][1] . ' set', $e);
+        }
+    }
+
+    /**
+     * Lens-Shift kennt keinen Absolutwert. Wie die Web Control: Ist lesen, Differenz
+     * fahren. Ohne frischen Istwert wird nicht gefahren - eine Differenz zu einem
+     * veralteten Wert fährt das Bild an eine falsche Stelle.
+     */
+    private function MoveLensShift($ident, $target)
+    {
+        if (!$this->LensReady()) {
+            return;
+        }
+        $target = max(0, min(65535, (int)$target));
+        $axes = $this->LensAxes();
+
+        try {
+            $current = $this->ReadLensPosition($ident);
+            if ($current === null) {
+                throw new Exception('Lens-Shift-Position nicht lesbar (' . $axes[$ident][0] . ').');
+            }
+
+            if ($this->LensShiftDir($ident) === 0 && abs($target - $current) > self::LENS_SHIFT_PROBE) {
+                $current = $this->ProbeLensShiftDir($ident, $current, $target);
+            }
+
+            $befehl = $this->LensShiftCommand($current, $target, $this->LensShiftDir($ident));
+            if ($befehl !== null) {
+                $this->EpsonDirectSend($axes[$ident][1], $befehl);
+            }
+            $this->MarkLensPending($ident, $target, $current);
+        } catch (Throwable $e) {
+            $this->HandleImmediateCommandError($axes[$ident][1] . ' shift', $e);
+        }
+    }
+
+    /**
+     * Ein kleines Stück Richtung Ziel fahren und nachsehen, wohin das Objektiv lief.
+     * Gibt die frische Position zurück; die Richtung ist danach gemerkt - es sei denn,
+     * das Objektiv hat sich in der Zeit nicht messbar bewegt.
+     */
+    private function ProbeLensShiftDir($ident, $current, $target)
+    {
+        $axes = $this->LensAxes();
+        $hoch = $target > $current;
+        $wort = $hoch ? 'INC' : 'DEC'; // Annahme der Web Control: INC hebt
+
+        $this->EpsonDirectSend($axes[$ident][1], $wort . ' ' . self::LENS_SHIFT_PROBE);
+        IPS_Sleep(1200);
+
+        $danach = $this->ReadLensPosition($ident);
+        if ($danach === null) {
+            return $current;
+        }
+        $bewegt = $danach - $current;
+        if (abs($bewegt) >= 3) { // über dem Leserauschen von ±1
+            $wirkung = ($bewegt > 0) ? 1 : -1;
+            $this->SetLensShiftDir($ident, ($wort === 'INC') ? $wirkung : -$wirkung);
+        }
+        return $danach;
+    }
+
+    private function ReadLensPosition($ident)
+    {
+        $axes = $this->LensAxes();
+        $wert = $this->ParseLensReply($this->EpsonWebGet($axes[$ident][0]));
+        return ($wert === null) ? null : $wert['pos'];
+    }
+
+    // Gelernte Wirkung von INC: 1, -1 oder 0 (unbekannt)
+    private function LensShiftDir($ident)
+    {
+        $dir = json_decode((string)$this->ReadAttributeString('LensShiftDir'), true);
+        return (is_array($dir) && isset($dir[$ident])) ? (int)$dir[$ident] : 0;
+    }
+
+    private function SetLensShiftDir($ident, $wirkung)
+    {
+        $dir = json_decode((string)$this->ReadAttributeString('LensShiftDir'), true);
+        if (!is_array($dir)) {
+            $dir = [];
+        }
+        if (isset($dir[$ident]) && (int)$dir[$ident] === (int)$wirkung) {
+            return;
+        }
+        $dir[$ident] = (int)$wirkung;
+        $this->WriteAttributeString('LensShiftDir', json_encode($dir));
+        $this->LogMessage($ident . ': INC ' . ($wirkung > 0 ? 'hebt' : 'senkt') . ' den Wert an diesem Projektor.', KL_MESSAGE);
+    }
+
+    /**
+     * "INC 25" / "DEC 25" für den Weg von $current nach $target, null wenn schon dort.
+     * $incWirkung: 1 = INC hebt den Wert, -1 = INC senkt ihn, 0 = unbekannt (wie 1).
+     */
+    private function LensShiftCommand($current, $target, $incWirkung = 1)
+    {
+        $delta = (int)$target - (int)$current;
+        if ($delta === 0) {
+            return null;
+        }
+        $hoch = $delta > 0;
+        $inc = ($incWirkung < 0) ? !$hoch : $hoch;
+        return ($inc ? 'INC ' : 'DEC ') . abs($delta);
+    }
+
+    /** "153 04" -> ['pos' => 153, 'status' => '04']; ERR/leer/unlesbar -> null. */
+    private function ParseLensReply($reply)
+    {
+        if ($reply === null || $reply === 'ERR') {
+            return null;
+        }
+        if (!preg_match('/^\s*(\d+)(?:\s+([0-9A-Fa-f]{2}))?\s*$/', (string)$reply, $m)) {
+            return null;
+        }
+        return ['pos' => (int)$m[1], 'status' => isset($m[2]) ? $m[2] : ''];
+    }
+
+    // Ziel sofort anzeigen und schneller pollen, bis das Objektiv angekommen ist.
+    private function MarkLensPending($ident, $target, $start = null)
+    {
+        $pending = json_decode((string)$this->GetBuffer('LensPending'), true);
+        if (!is_array($pending)) {
+            $pending = [];
+        }
+        $pending[$ident] = ['target' => (int)$target, 'until' => time() + self::LENS_PENDING_SECONDS];
+        if ($start !== null) {
+            $pending[$ident]['start'] = (int)$start; // für die Richtungsprüfung im Poll
+        }
+        $this->SetBuffer('LensPending', json_encode($pending));
+
+        $this->SetValue($ident, (int)$target);
+        $this->SetValue('__LastChangeTS', time()); // FastAfterChange: Fahrt im schnellen Takt verfolgen
+        $this->SetPollInterval($this->ReadPropertyInteger('PollFast'));
+    }
+
+    // Hat sich ein Shift seit dem Befehl vom Ziel entfernt? Nur einmal je Fahrt korrigieren.
+    private function LensShiftRanAway($ident, array $pending, $pos)
+    {
+        if (!in_array($ident, ['LensShiftH', 'LensShiftV'], true)) {
+            return false;
+        }
+        if (!isset($pending['start']) || !empty($pending['corrected'])) {
+            return false;
+        }
+        $vorher = abs((int)$pending['start'] - (int)$pending['target']);
+        $jetzt  = abs((int)$pos - (int)$pending['target']);
+        return $jetzt > $vorher + 2;
+    }
+
+    private function PollLens()
+    {
+        if (!$this->ReadPropertyBoolean('EnableLens') || !$this->HasVariable('LensZoom')) {
+            return;
+        }
+        if (!$this->IsOn()) {
+            return;
+        }
+
+        // Ruhig alle 30 s, während einer Fahrt bei jedem Poll
+        $pending = json_decode((string)$this->GetBuffer('LensPending'), true);
+        $takt = (is_array($pending) && count($pending) > 0) ? 0 : 30;
+        $last = (int)$this->GetBuffer('LensPollTS');
+        if ($takt > 0 && $last > 0 && (time() - $last) < $takt) {
+            return;
+        }
+        $this->SetBuffer('LensPollTS', (string)time());
+
+        $this->ReadLensInto();
+
+        // Belegung des Objektivspeichers einmalig nachholen, sobald das Gerät an ist
+        if (trim((string)$this->ReadAttributeString('LensMemorySlots')) === '') {
+            $this->ReadLensMemoryInto();
+        }
+    }
+
+    private function ReadLensInto()
+    {
+        $pending = json_decode((string)$this->GetBuffer('LensPending'), true);
+        if (!is_array($pending)) {
+            $pending = [];
+        }
+
+        try {
+            foreach ($this->LensAxes() as $ident => $axis) {
+                $wert = $this->ParseLensReply($this->EpsonWebGet($axis[0]));
+                if ($wert === null) {
+                    continue; // Achse gibt es an diesem Objektiv nicht oder gerade nicht lesbar
+                }
+
+                if (isset($pending[$ident])) {
+                    $ziel = (int)$pending[$ident]['target'];
+                    $angekommen = abs($wert['pos'] - $ziel) <= 1; // ±1 Leserauschen
+
+                    if (!$angekommen && $this->LensShiftRanAway($ident, $pending[$ident], $wert['pos'])) {
+                        // Falsche Richtung (z. B. Projektionsart geändert): umlernen, einmal korrigieren
+                        $this->SetLensShiftDir($ident, -($this->LensShiftDir($ident) ?: 1));
+                        $befehl = $this->LensShiftCommand($wert['pos'], $ziel, $this->LensShiftDir($ident));
+                        if ($befehl !== null) {
+                            $this->EpsonDirectSend($axis[1], $befehl);
+                        }
+                        $pending[$ident] = ['target' => $ziel, 'until' => time() + self::LENS_PENDING_SECONDS,
+                                            'start' => $wert['pos'], 'corrected' => true];
+                        continue;
+                    }
+
+                    if (!$angekommen && time() < (int)$pending[$ident]['until']) {
+                        continue; // fährt noch - Ziel stehen lassen statt Zwischenwerte zeigen
+                    }
+                    unset($pending[$ident]);
+                }
+                $this->SetValueIfChanged($ident, $wert['pos']);
+            }
+        } catch (Throwable $e) {
+            $this->LogMessage('Objektiv-Abfrage fehlgeschlagen: ' . $e->getMessage(), KL_DEBUG);
+        }
+
+        $this->SetBuffer('LensPending', json_encode($pending));
+    }
+
+    // ---------- Objektivspeicher ----------
+
+    public function LoadLensMemory(int $Slot)
+    {
+        if (!$this->LensReady()) {
+            return;
+        }
+        if ($Slot < 1 || $Slot > self::LENS_MEMORY_SLOTS) {
+            $this->LogMessage('Objektivspeicher ' . $Slot . ' gibt es nicht (1-' . self::LENS_MEMORY_SLOTS . ').', KL_WARNING);
+            return;
+        }
+
+        $info = json_decode((string)$this->ReadAttributeString('LensMemorySlots'), true);
+        if (is_array($info) && isset($info[$Slot]) && empty($info[$Slot]['used'])) {
+            $this->LogMessage('Objektivspeicher ' . $Slot . ' ist leer - nichts geladen.', KL_WARNING);
+            return;
+        }
+
+        try {
+            $this->EpsonDirectSend('POPLP', (string)$Slot);
+            $this->SetValue('LensMemory', $Slot);
+            // Alle Achsen fahren jetzt - offene Ziele verwerfen, die Fahrt im schnellen Takt zeigen
+            $this->SetBuffer('LensPending', '');
+            $this->SetBuffer('LensPollTS', '');
+            $this->SetValue('__LastChangeTS', time());
+            $this->SetPollInterval($this->ReadPropertyInteger('PollFast'));
+        } catch (Throwable $e) {
+            $this->HandleImmediateCommandError('POPLP', $e);
+        }
+    }
+
+    /**
+     * Aktuelle Objektivposition auf einem Platz ablegen, optional mit Namen.
+     * Bewegt nichts, überschreibt aber einen belegten Platz.
+     */
+    public function SaveLensMemory(int $Slot, string $Name)
+    {
+        if (!$this->LensReady()) {
+            return;
+        }
+        if ($Slot < 1 || $Slot > self::LENS_MEMORY_SLOTS) {
+            $this->LogMessage('Objektivspeicher ' . $Slot . ' gibt es nicht (1-' . self::LENS_MEMORY_SLOTS . ').', KL_WARNING);
+            return;
+        }
+
+        try {
+            $this->EpsonDirectSend('PUSHLP', (string)$Slot);
+            $Name = trim($Name);
+            if ($Name !== '') {
+                $this->EpsonDirectSend('NAMELP', $Slot . ' ' . $this->EncodeLensName($Name));
+            }
+        } catch (Throwable $e) {
+            $this->HandleImmediateCommandError('PUSHLP', $e);
+            return;
+        }
+        $this->ReadLensMemoryInto();
+    }
+
+    /** Belegung und Namen neu einlesen, z. B. per PJP_RefreshLensMemory($id). */
+    public function RefreshLensMemory()
+    {
+        if (!$this->LensReady()) {
+            return;
+        }
+        $this->ReadLensMemoryInto();
+    }
+
+    private function ReadLensMemoryInto()
+    {
+        try {
+            // Bitmuster der belegten Plätze, Bit 0 = Platz 1 ("0000" = alles leer)
+            $status = $this->EpsonWebGet('IMLPSTATUS?');
+            if ($status === null || $status === 'ERR' || !preg_match('/^[0-9A-Fa-f]+$/', $status)) {
+                return; // nicht entscheidbar - lieber nichts festschreiben
+            }
+            $bits = hexdec($status);
+
+            $info = [];
+            for ($slot = 1; $slot <= self::LENS_MEMORY_SLOTS; $slot++) {
+                $name = $this->EpsonWebGet('NAMELP? ' . $slot);
+                $info[$slot] = [
+                    'used' => (($bits >> ($slot - 1)) & 1) === 1,
+                    'name' => ($name === null || $name === 'ERR') ? '' : $this->DecodeLensName($name),
+                ];
+            }
+            $this->WriteAttributeString('LensMemorySlots', json_encode($info));
+            $this->EnsureLensMemoryProfile();
+        } catch (Throwable $e) {
+            $this->LogMessage('Objektivspeicher nicht lesbar: ' . $e->getMessage(), KL_DEBUG);
+        }
+    }
+
+    // Namen tauscht die Web Control als Hex-Bytes mit Leerzeichen aus: "Saal" <-> "53 61 61 6c"
+    private function EncodeLensName($name)
+    {
+        $teile = [];
+        foreach (str_split((string)$name) as $zeichen) {
+            $teile[] = dechex(ord($zeichen));
+        }
+        return implode(' ', $teile);
+    }
+
+    private function DecodeLensName($reply)
+    {
+        $reply = trim((string)$reply);
+        if ($reply === '' || !preg_match('/^[0-9A-Fa-f]{1,2}(\s+[0-9A-Fa-f]{1,2})*$/', $reply)) {
+            return $reply; // kein Hex-Format - so lassen, wie es kommt
+        }
+        $name = '';
+        foreach (preg_split('/\s+/', $reply) as $hex) {
+            $name .= chr(hexdec($hex));
+        }
+        return $name;
+    }
+
+    // directsend antwortet ohne Inhalt; ob ein Befehl wirkte, zeigt erst das Nachlesen.
+    private function EpsonDirectSend($cmd, $value)
+    {
+        $this->EpsonWebRequest('/cgi-bin/directsend', rawurlencode((string)$cmd) . '=' . rawurlencode((string)$value));
+    }
+
     // ---------- Epson Web Control HTTP Low-Level ----------
     private function EpsonWebGet($cmd)
     {
@@ -2723,7 +3290,8 @@ class PJLinkProjector extends IPSModule
         if ($host === '') throw new Exception('Host ist leer.');
 
         $https  = (bool)$this->ReadPropertyBoolean('WebHTTPS');
-        $base   = ($https ? 'https' : 'http') . '://' . $host;
+        $port   = (int)$this->ReadPropertyInteger('WebPort');
+        $base   = ($https ? 'https' : 'http') . '://' . $host . ($port > 0 ? (':' . $port) : '');
         $url    = $base . $path . ($query !== '' ? ('?' . $query) : '');
 
         $ch = curl_init();

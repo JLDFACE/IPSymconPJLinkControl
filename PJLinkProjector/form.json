@@ -42,6 +42,13 @@
     { "type": "ValidationTextBox", "name": "WebUser", "caption": "Web-Control Benutzer (Standard: EPSONWEB)" },
     { "type": "PasswordTextBox", "name": "WebPassword", "caption": "Web-Control Passwort" },
     { "type": "CheckBox", "name": "WebHTTPS", "caption": "HTTPS statt HTTP verwenden" },
+    { "type": "NumberSpinner", "name": "WebPort", "caption": "Web-Control Port (0 = Standard 80/443)", "minimum": 0, "maximum": 65535 },
+
+    { "type": "Label", "caption": "Objektivsteuerung über die Epson Web Control (Zoom, Fokus, Lens-Shift, Objektivspeicher). Nur bei eingeschaltetem Projektor." },
+    { "type": "CheckBox", "name": "EnableLens", "caption": "Objektivsteuerung aktivieren" },
+    { "type": "Label", "caption": "Bereich von Zoom und Fokus je nach Objektiv – ablesen am Regler der Web-Control-Seite „Lens Control“. 0 = unbekannt: Eingabefeld statt Regler." },
+    { "type": "NumberSpinner", "name": "LensZoomMax", "caption": "Zoom bis", "minimum": 0, "maximum": 65535 },
+    { "type": "NumberSpinner", "name": "LensFocusMax", "caption": "Fokus bis", "minimum": 0, "maximum": 65535 },
 
     { "type": "Label", "caption": "Automatische Anpassung an Raumhelligkeit (benötigt aktivierte Lichtleistungs-Steuerung):" },
     { "type": "CheckBox", "name": "AutoBrightnessEnable", "caption": "Auto-Helligkeit aktivieren" },
@@ -67,6 +74,16 @@
   "actions": [
     { "type": "Button", "caption": "Jetzt Status aktualisieren", "onClick": "PJP_Poll($id);" },
     { "type": "Button", "caption": "Eingänge neu einlesen (Namen vom Gerät)", "onClick": "PJP_RefreshAvailableInputs($id);" },
-    { "type": "Button", "caption": "Geräteinfo neu einlesen (Modell, Seriennummer, Firmware)", "onClick": "echo PJP_ReadDeviceInfo($id);" }
+    { "type": "Button", "caption": "Geräteinfo neu einlesen (Modell, Seriennummer, Firmware)", "onClick": "echo PJP_ReadDeviceInfo($id);" },
+    { "type": "Label", "caption": "Objektivspeicher (nur mit aktivierter Objektivsteuerung, Projektor an):" },
+    {
+      "type": "RowLayout",
+      "items": [
+        { "type": "NumberSpinner", "name": "LensSlot", "caption": "Platz", "minimum": 1, "maximum": 9, "value": 1 },
+        { "type": "ValidationTextBox", "name": "LensName", "caption": "Name (optional)" },
+        { "type": "Button", "caption": "Aktuelle Objektivposition speichern", "onClick": "PJP_SaveLensMemory($id, $LensSlot, $LensName);" }
+      ]
+    },
+    { "type": "Button", "caption": "Objektivspeicher neu einlesen", "onClick": "PJP_RefreshLensMemory($id);" }
   ]
 }

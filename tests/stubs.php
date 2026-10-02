@@ -66,6 +66,8 @@ function IPS_SetIcon($id, $i)    { IPSKernel::$objects[$id]['icon'] = $i; }
 function IPS_SetName($id, $n)    { IPSKernel::$objects[$id]['name'] = $n; }
 function IPS_GetName($id)        { return IPSKernel::$objects[$id]['name'] ?? ''; }
 
+function IPS_Sleep($ms) { usleep((int)$ms * 1000); }
+
 function GetValue($id) { return IPSKernel::$values[$id] ?? null; }
 function SetValue($id, $v) { IPSKernel::$values[$id] = $v; }
 

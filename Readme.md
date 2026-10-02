@@ -11,6 +11,8 @@ Zusätzlich kann für **Epson-Modelle mit Epson Web Control** die **Laser-Lichtl
 gesteuert werden (getestet am **Epson QS100**) – inklusive einer **automatischen Anpassung an die
 Raumhelligkeit** über einen verknüpften Helligkeitssensor (z. B. KNX-Lux-Wert). Da PJLink selbst
 keinen Helligkeitsbefehl kennt, läuft dieser Teil über die HTTP-API der Epson Web Control.
+Über denselben Weg steuert das Modul auf Wunsch auch das **Objektiv**: Zoom, Fokus, Lens-Shift und
+den Objektivspeicher (getestet am **Epson EB-PU2216B**).
 
 Das Modul ist für den stabilen Betrieb auf der **SymBox** ausgelegt.
 
@@ -137,6 +139,16 @@ neue Variablen bekommen.
 | Web-Control Benutzer | Benutzername der Epson Web Control (Standard: `EPSONWEB`) |
 | Web-Control Passwort | Passwort der Epson Web Control |
 | HTTPS statt HTTP verwenden | Zugriff über Port 443 statt 80 (selbstsigniertes Zertifikat wird akzeptiert) |
+| Web-Control Port | Abweichender Port der Web Control, `0` = Standard (80 bzw. 443) |
+
+### Objektivsteuerung (Epson Web Control)
+
+Nutzt dieselben Web-Control-Zugangsdaten wie die Lichtleistung.
+
+| Eigenschaft | Beschreibung |
+|------------|--------------|
+| Objektivsteuerung aktivieren | Legt die Objektiv-Variablen an |
+| Zoom bis / Fokus bis | Obergrenze des Reglers. Hängt vom Objektiv ab und lässt sich nicht abfragen – am Regler der Web-Control-Seite „Lens Control“ ablesen. `0` = unbekannt: Eingabefeld statt Regler, das Gerät begrenzt selbst. |
 
 ### Automatische Anpassung an Raumhelligkeit
 
@@ -182,13 +194,19 @@ neue Variablen bekommen.
 | LightMode⁴ | Integer | Lichtleistungs-Modus: Hoch / Eco / Mittel / Custom |
 | LightLevel⁴ | Integer | Lichtleistungs-Pegel 0–250 (nur im Custom-Modus wirksam) |
 | AutoBrightness⁵ | Boolean | Laufzeit-Schalter der automatischen Raumhelligkeits-Regelung |
+| LensZoom⁷ | Integer | Optischer Zoom, absolut |
+| LensFocus⁷ | Integer | Fokus, absolut |
+| LensShiftH⁷ | Integer | Lens-Shift horizontal (16 Bit, Mitte 32768) |
+| LensShiftV⁷ | Integer | Lens-Shift vertikal (16 Bit, Mitte 32768) |
+| LensMemory⁷ | Integer | Objektivspeicher laden (Platz 1–9, Beschriftung vom Gerät) |
 
 ¹ nur wenn *Bild/Ton stumm schalten* aktiviert ist  
 ² nur wenn *Standbild* aktiviert ist  
 ³ nur wenn *Diagnose* aktiviert ist  
 ⁴ nur wenn *Lichtleistungs-Steuerung* aktiviert ist  
 ⁵ nur wenn zusätzlich *Auto-Helligkeit* aktiviert ist  
-⁶ nur wenn *Betriebswerte lesen* aktiviert ist (Epson Web Control)
+⁶ nur wenn *Betriebswerte lesen* aktiviert ist (Epson Web Control)  
+⁷ nur wenn *Objektivsteuerung* aktiviert ist (Epson Web Control)
 
 ### Interne Variablen (versteckt)
 
@@ -270,6 +288,65 @@ ihren letzten Wert. `ONTIME?` antwortet auch im Standby.
 
 Kennt ein Gerät eine dieser Abfragen nicht, bleibt der Wert stehen. Es gibt dafür keine Warnung
 und keine Offline-Meldung. `PJP_ReadEpsonStatus($id)` liest sofort, ohne Drosselung.
+
+---
+
+## Objektivsteuerung (Epson Web Control)
+
+PJLink kennt keine Objektivbefehle. Das Modul nutzt dieselben Befehle wie die Seite „Lens Control“
+der Web Control selbst (`lenscontrol.js`, `lensshift.js`, `memory.js` auf dem Gerät):
+
+| Achse | Lesen (`json_query`) | Stellen (`directsend`) |
+|-------|----------------------|------------------------|
+| Zoom | `IMZOOM?` | `IMZOOM=<wert>` (absolut) |
+| Fokus | `IMFOCUS?` | `IMFOCUS=<wert>` (absolut) |
+| Shift horizontal | `IMHLENS?` | `IMHLENS=INC <n>` / `DEC <n>` (relativ) |
+| Shift vertikal | `IMLENS?` | `IMLENS=INC <n>` / `DEC <n>` (relativ) |
+| Speicher | `IMLPSTATUS?` (Bitmuster), `NAMELP? <n>` | `POPLP=<n>` laden, `PUSHLP=<n>` speichern, `NAMELP=<n> <hex>` |
+
+Die Abfragen antworten mit „Position Status“, z. B. `153 04`: `02` = Maximum erreicht,
+`03` = Minimum, `04` = frei. Alles nur bei eingeschaltetem Projektor; im Standby antwortet die
+Web Control auf jede Objektivabfrage mit `ERR`, das Modul sendet dann gar nicht erst.
+
+**Achtung:** `ZOOM?` / `ZOOM INC` ist das **digitale E-Zoom**, nicht der optische Zoom.
+
+### Lens-Shift: Richtung wird gelernt
+
+Für den Shift gibt es keinen Absolutwert. Das Modul liest die Position und fährt die Differenz.
+In welche Richtung `INC` zählt, hängt aber vom Gerät ab: Am EB-PU2216B im SKUZ **senkt** `INC` den
+horizontalen Wert und **hebt** den vertikalen. Das Modul lernt die Richtung deshalb je Achse:
+
+- Bei unbekannter Richtung fährt es zuerst nur **5 Counts** (im Bild nicht zu sehen), liest nach und
+  merkt sich die Richtung. Danach fährt es den Rest.
+- Läuft ein Shift trotzdem vom Ziel weg, z. B. nach einer Umstellung der Projektionsart, erkennt der
+  Poll das, dreht die gemerkte Richtung um und korrigiert einmal.
+
+### Rückmeldung während der Fahrt
+
+Nach einem Stellbefehl zeigt die Variable sofort das Ziel und das Modul pollt schnell. Zwischenwerte
+während der Fahrt überschreiben das Ziel nicht. Erreicht das Objektiv das Ziel nicht innerhalb von
+20 Sekunden (z. B. außerhalb des Bereichs), gilt wieder der Wert vom Gerät.
+
+### Objektivspeicher
+
+Neun Plätze. Die Beschriftung der Variable kommt vom Gerät (`3: Saal`), leere Plätze sind als
+„(leer)“ markiert und werden nicht geladen. Speichern bewegt nichts, überschreibt aber den Platz.
+
+**Hinweis:** Ein Name bleibt am Gerät stehen, auch wenn der Platz gelöscht wird (`ERASELP`), und
+lässt sich über die Web Control nicht leeren – nur überschreiben.
+
+### Steuerung per Skript
+
+| Funktion | Beschreibung |
+|----------|--------------|
+| `PJP_SetLensZoom($id, $wert)` | Zoom absolut |
+| `PJP_SetLensFocus($id, $wert)` | Fokus absolut |
+| `PJP_SetLensShiftH($id, $wert)` / `PJP_SetLensShiftV($id, $wert)` | Lens-Shift auf Zielwert |
+| `PJP_LoadLensMemory($id, $platz)` | Objektivspeicher 1–9 laden |
+| `PJP_SaveLensMemory($id, $platz, $name)` | Aktuelle Position ablegen, `$name` optional (`''`) |
+| `PJP_RefreshLens($id)` / `PJP_RefreshLensMemory($id)` | Sofort neu lesen |
+
+Speichern geht auch im Konfigurationsformular unter *Aktionen*.
 
 ---
 
@@ -368,6 +445,11 @@ php tests/live_test.php --host=192.168.2.118 --extras   # gegen einen echten Pro
 echter Hardware kaum herstellen lassen: Class-1-Geräte, aktivierte Authentifizierung, Geräte mit
 CRLF-Zeilenenden, abgelehnte `AVMT`-Varianten und ausbleibende Antworten.
 
+`tests/fake_webcontrol.php` ist eine kleine Epson Web Control für den PHP-Server (`php -S`). Daran
+prüft die Testsuite die Objektivsteuerung: absolute und relative Befehle, das Lernen der
+Shift-Richtung (auch an einer umgedrehten Achse), die Rückmeldung während der Fahrt und den
+Objektivspeicher.
+
 `tests/live_test.php` fährt das Modul gegen ein echtes Gerät und kann auf Wunsch schalten
 (`--power=on|off`, `--switch=<logischer Wert>`, `--avmute=on|off`, `--freeze=on|off`, `--powercycle`).
 
@@ -393,6 +475,7 @@ CRLF-Zeilenenden, abgelehnte `AVMT`-Varianten und ausbleibende Antworten.
 | Panasonic PT-VMZ72 | Class 2 | Power, alle sechs Eingänge, AV-Mute, Diagnose live geprüft. `FREZ` nur mit anliegendem Signal, `AVMT 11` wird abgewiesen. |
 | Sony VPL-FHZ80 | Class 2 | HDBaseT liegt auf 33 statt 36 |
 | Epson QS100 | Class 2 | zusätzlich Lichtleistung über Epson Web Control (alter OSD-Weg, mit dem nativen Befehl noch nicht erneut geprüft) |
+| Epson EB-PU2216B | Class 2 | Objektivsteuerung live geprüft: Fokus absolut, Lens-Shift H/V mit gelernter Richtung (H umgedreht, V nicht), Objektivspeicher-Bitmuster. Lichtleistung meldet bis 253. |
 | Epson EB-L265F | Class 2 | PJLink mit Passwort, elf Eingänge, kein HDBaseT/SDI, AV-Mute, Diagnose, Lichtleistung über den nativen Befehl live geprüft. Meldet beim Umschalten `POWR=ERR3`. |
 
 ---

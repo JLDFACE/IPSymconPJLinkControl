@@ -561,6 +561,278 @@ gleich('ERR 04', '04 – Innentemperatur zu hoch', $fehler->invoke($m, '04'));
 gleich('ERR 0c klein geschrieben', '0C – Luftstrom zu gering', $fehler->invoke($m, '0c'));
 gleich('Unbekannter Code bleibt sichtbar', '2A – siehe Epson-Handbuch', $fehler->invoke($m, '2A'));
 
+// ---------------------------------------------------------------- Objektiv (Web Control)
+
+/** Startet die Schreibtisch-Web-Control (php -S) mit einem Anfangszustand. */
+function starteWebControl(array $state = [])
+{
+    $stateFile = tempnam(sys_get_temp_dir(), 'pjp_wc_state');
+    $logFile   = tempnam(sys_get_temp_dir(), 'pjp_wc_log');
+    file_put_contents($stateFile, json_encode($state));
+    file_put_contents($logFile, '');
+
+    // Freien Port vom Betriebssystem holen
+    $sock = stream_socket_server('tcp://127.0.0.1:0');
+    $port = (int)substr(strrchr(stream_socket_get_name($sock, false), ':'), 1);
+    fclose($sock);
+
+    $env = array_merge(getenv(), ['FAKE_WC_STATE' => $stateFile, 'FAKE_WC_LOG' => $logFile]);
+    $pipes = [];
+    $proc = proc_open([PHP_BINARY, '-S', '127.0.0.1:' . $port, __DIR__ . '/fake_webcontrol.php'],
+        [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, $env);
+
+    $frist = microtime(true) + 10;
+    while (microtime(true) < $frist) {
+        $fp = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.2);
+        if ($fp) {
+            fclose($fp);
+            return ['proc' => $proc, 'pipes' => $pipes, 'port' => $port, 'state' => $stateFile, 'log' => $logFile];
+        }
+        usleep(50000);
+    }
+    proc_terminate($proc);
+    throw new Exception('Schreibtisch-Web-Control meldete sich nicht.');
+}
+
+function stoppeWebControl($w)
+{
+    foreach ($w['pipes'] as $pipe) {
+        @fclose($pipe);
+    }
+    proc_terminate($w['proc']);
+    proc_close($w['proc']);
+    @unlink($w['state']);
+    @unlink($w['log']);
+}
+
+/** Alle directsend-Befehle seit Start (ohne json_query-Abfragen). */
+function gesendet($w)
+{
+    $zeilen = array_filter(explode("\n", (string)file_get_contents($w['log'])));
+    $befehle = [];
+    foreach ($zeilen as $z) {
+        if (strpos($z, '/cgi-bin/directsend?') === 0) {
+            $befehle[] = substr($z, strlen('/cgi-bin/directsend?'));
+        }
+    }
+    return array_values($befehle);
+}
+
+function wcZustand($w)
+{
+    return json_decode((string)file_get_contents($w['state']), true);
+}
+
+/** Modul mit Objektivsteuerung gegen die Schreibtisch-Web-Control, Projektor an. */
+function objektivModul($w, array $props = [])
+{
+    IPSKernel::reset();
+    $m = new PJLinkProjector();
+    $m->Create();
+    foreach (array_merge([
+        'Host' => '127.0.0.1', 'Vendor' => 'EPSON', 'EnableLens' => true,
+        'WebUser' => 'EPSONWEB', 'WebPassword' => 'x', 'WebPort' => $w['port'],
+    ], $props) as $k => $v) {
+        $m->TestSetProperty($k, $v);
+    }
+    $m->ApplyChanges();          // Projektor noch aus: nichts lesen, nichts senden
+    $m->SetValue('PowerState', 1);
+    return $m;
+}
+
+if (!function_exists('curl_init')) {
+    abschnitt('Objektivsteuerung: uebersprungen (PHP ohne curl)');
+} else {
+
+abschnitt('Objektiv: Positionen lesen, Zoom/Fokus absolut, Shift als Differenz');
+$w = starteWebControl();
+try {
+    $m = objektivModul($w);
+    gleich('Im Standby nichts gesendet', 0, count(gesendet($w)));
+
+    $m->RefreshLens();
+    gleich('Zoom gelesen', 12, $m->GetValue('LensZoom'));
+    gleich('Fokus gelesen', 153, $m->GetValue('LensFocus'));
+    gleich('Shift H gelesen', 32521, $m->GetValue('LensShiftH'));
+    gleich('Shift V gelesen', 34374, $m->GetValue('LensShiftV'));
+
+    $m->RequestAction('LensZoom', 20);
+    $m->RequestAction('LensFocus', 160);
+    gleich('Zoom absolut gesendet', 'IMZOOM=20', gesendet($w)[0] ?? '');
+    gleich('Fokus absolut gesendet', 'IMFOCUS=160', gesendet($w)[1] ?? '');
+
+    // Richtung noch unbekannt: erst 5 Counts probieren, dann den Rest
+    $m->RequestAction('LensShiftH', 32546);
+    $m->RequestAction('LensShiftV', 34300);
+    gleich('Shift H: Probeschritt', 'IMHLENS=INC 5', gesendet($w)[2] ?? '');
+    gleich('Shift H: Rest als INC', 'IMHLENS=INC 20', gesendet($w)[3] ?? '');
+    gleich('Shift V: Probeschritt', 'IMLENS=DEC 5', gesendet($w)[4] ?? '');
+    gleich('Shift V: Rest als DEC', 'IMLENS=DEC 69', gesendet($w)[5] ?? '');
+
+    $z = wcZustand($w);
+    gleich('Geraet steht auf Zoom 20', 20, $z['zoom']);
+    gleich('Geraet steht auf Shift H 32546', 32546, $z['h']);
+    gleich('Geraet steht auf Shift V 34300', 34300, $z['v']);
+
+    $m->RequestAction('LensShiftH', 32546);
+    gleich('Shift aufs aktuelle Ziel sendet nichts', 6, count(gesendet($w)));
+
+    $m->RequestAction('LensShiftH', 32521);
+    gleich('Richtung gelernt: kein Probeschritt mehr', 'IMHLENS=DEC 25', gesendet($w)[6] ?? '');
+
+    $m->RefreshLens();
+    gleich('Nach dem Lesen: Zoom 20', 20, $m->GetValue('LensZoom'));
+    gleich('Nach dem Lesen: Shift V 34300', 34300, $m->GetValue('LensShiftV'));
+
+    $m->SetValue('PowerState', 0);
+    $m->RequestAction('LensZoom', 30);
+    $m->RequestAction('LensShiftH', 30000);
+    gleich('Projektor aus: kein Befehl', 7, count(gesendet($w)));
+    gleich('Projektor aus: Zoom-Variable unveraendert', 20, $m->GetValue('LensZoom'));
+} finally {
+    stoppeWebControl($w);
+}
+
+abschnitt('Objektiv: Shift-Richtung umgekehrt (wie PU2216B im SKUZ)');
+$w = starteWebControl(['invert' => ['h']]);
+try {
+    $m = objektivModul($w);
+    $m->RequestAction('LensShiftH', 32546);
+    gleich('Probeschritt laeuft in die falsche Richtung', 'IMHLENS=INC 5', gesendet($w)[0] ?? '');
+    gleich('Rest korrigiert als DEC 30', 'IMHLENS=DEC 30', gesendet($w)[1] ?? '');
+    gleich('Geraet steht auf dem Ziel', 32546, wcZustand($w)['h']);
+    gleich('Richtung gemerkt', '{"LensShiftH":-1}', $m->ReadAttributeString('LensShiftDir'));
+
+    $m->RequestAction('LensShiftH', 32521);
+    gleich('Zweite Fahrt direkt richtig', 'IMHLENS=INC 25', gesendet($w)[2] ?? '');
+    gleich('Wieder auf dem Ausgangswert', 32521, wcZustand($w)['h']);
+
+    $m->RequestAction('LensShiftV', 34376);
+    gleich('Kleiner Weg (<= 5) ohne Probe', 'IMLENS=INC 2', gesendet($w)[3] ?? '');
+} finally {
+    stoppeWebControl($w);
+}
+
+abschnitt('Objektiv: falsch gemerkte Richtung wird im Poll erkannt und korrigiert');
+$w = starteWebControl(['invert' => ['h']]);
+try {
+    $m = objektivModul($w);
+    $m->WriteAttributeString('LensShiftDir', '{"LensShiftH":1}'); // z. B. Projektionsart umgestellt
+    $m->RequestAction('LensShiftH', 32546);
+    gleich('Mit alter Richtung gesendet', 'IMHLENS=INC 25', gesendet($w)[0] ?? '');
+    gleich('Geraet laeuft weg', 32496, wcZustand($w)['h']);
+
+    $m->RefreshLens();
+    gleich('Im Poll korrigiert', 'IMHLENS=DEC 50', gesendet($w)[1] ?? '');
+    gleich('Geraet doch auf dem Ziel', 32546, wcZustand($w)['h']);
+    gleich('Richtung umgelernt', '{"LensShiftH":-1}', $m->ReadAttributeString('LensShiftDir'));
+    gleich('Variable zeigt das Ziel', 32546, $m->GetValue('LensShiftH'));
+
+    $m->RefreshLens();
+    gleich('Keine zweite Korrektur', 2, count(gesendet($w)));
+} finally {
+    stoppeWebControl($w);
+}
+
+abschnitt('Objektiv: Ziel bleibt waehrend der Fahrt stehen, abgelehntes Ziel nicht ewig');
+$w = starteWebControl(['reject' => ['IMFOCUS']]);
+try {
+    $m = objektivModul($w);
+    $m->RefreshLens();
+    $m->RequestAction('LensFocus', 999);
+    gleich('Ziel sofort angezeigt', 999, $m->GetValue('LensFocus'));
+
+    $m->RefreshLens();
+    gleich('Waehrend der Frist: Ziel bleibt (kein Zwischenwert)', 999, $m->GetValue('LensFocus'));
+
+    // Frist abgelaufen -> wieder ehrlicher Gerätewert
+    $m->SetBuffer('LensPending', json_encode(['LensFocus' => ['target' => 999, 'until' => time() - 1]]));
+    $m->RefreshLens();
+    gleich('Nach der Frist: echter Wert vom Geraet', 153, $m->GetValue('LensFocus'));
+} finally {
+    stoppeWebControl($w);
+}
+
+abschnitt('Objektiv: Bereich aus der Konfiguration, ohne Bereich Eingabefeld');
+$w = starteWebControl();
+try {
+    $m = objektivModul($w);
+    $zoomProfil = 'PJP.LensZoom.' . $m->InstanceID;
+    gleich('Zoom ohne Bereich: 0..0 (Eingabefeld)', '0,0,1', implode(',', IPSKernel::$profiles[$zoomProfil]['values']));
+    $m->TestSetProperty('LensZoomMax', 400);
+    $m->ApplyChanges();
+    gleich('Zoom mit Bereich 400', '0,400,1', implode(',', IPSKernel::$profiles[$zoomProfil]['values']));
+    gleich('Shift 16 Bit', '0,65535,1', implode(',', IPSKernel::$profiles['PJP.LensShift']['values']));
+} finally {
+    stoppeWebControl($w);
+}
+
+abschnitt('Objektivspeicher: Belegung, Namen, Laden, Speichern');
+$w = starteWebControl(['lpstatus' => 0x0010, 'names' => ['5' => '53 61 61 6c'],
+                       'mem' => ['5' => ['zoom' => 40, 'focus' => 170, 'h' => 32768, 'v' => 32768]]]);
+try {
+    $m = objektivModul($w);
+    $m->RefreshLensMemory();
+    $assoc = IPSKernel::$profiles['PJP.LensMemory.' . $m->InstanceID]['assoc'];
+    gleich('Platz 5 belegt, Name dekodiert', '5: Saal', $assoc[5] ?? '');
+    gleich('Platz 1 leer markiert', 'Speicher 1 (leer)', $assoc[1] ?? '');
+    gleich('Neun Plaetze', 9, count($assoc));
+
+    $m->RequestAction('LensMemory', 1);
+    gleich('Leeren Platz nicht laden', 0, count(gesendet($w)));
+
+    $m->RequestAction('LensMemory', 5);
+    gleich('Belegten Platz laden', 'POPLP=5', gesendet($w)[0] ?? '');
+    gleich('Geraet faehrt auf die gespeicherte Position', 40, wcZustand($w)['zoom']);
+
+    $m->SaveLensMemory(2, 'Bühne');
+    gleich('Speichern', 'PUSHLP=2', gesendet($w)[1] ?? '');
+    gleich('Name als Hex', 'NAMELP=2 42 c3 bc 68 6e 65', gesendet($w)[2] ?? '');
+    $assoc = IPSKernel::$profiles['PJP.LensMemory.' . $m->InstanceID]['assoc'];
+    gleich('Platz 2 danach belegt mit Namen', '2: Bühne', $assoc[2] ?? '');
+
+    $m->SaveLensMemory(10, '');
+    gleich('Platz 10 gibt es nicht', 3, count(gesendet($w)));
+
+    // Beschriftung überlebt ein Modul-Update (Destroy räumt Instanzprofile ab)
+    unset(IPSKernel::$profiles['PJP.LensMemory.' . $m->InstanceID]);
+    $m->ApplyChanges();
+    $assoc = IPSKernel::$profiles['PJP.LensMemory.' . $m->InstanceID]['assoc'];
+    gleich('Nach Profilverlust wieder beschriftet', '5: Saal', $assoc[5] ?? '');
+} finally {
+    stoppeWebControl($w);
+}
+
+}
+
+abschnitt('Objektiv: Hilfsfunktionen');
+IPSKernel::reset();
+$m = new PJLinkProjector();
+$m->Create();
+$parse = new ReflectionMethod($m, 'ParseLensReply');
+$parse->setAccessible(true);
+$shift = new ReflectionMethod($m, 'LensShiftCommand');
+$shift->setAccessible(true);
+$enc = new ReflectionMethod($m, 'EncodeLensName');
+$enc->setAccessible(true);
+$dec = new ReflectionMethod($m, 'DecodeLensName');
+$dec->setAccessible(true);
+
+gleich('"153 04" -> 153', 153, $parse->invoke($m, '153 04')['pos']);
+gleich('"153 04" -> Status 04', '04', $parse->invoke($m, '153 04')['status']);
+gleich('ERR -> nichts', null, $parse->invoke($m, 'ERR'));
+gleich('Leer -> nichts', null, $parse->invoke($m, ''));
+gleich('Zwei Zahlen (LENS?-Format) -> nichts', null, $parse->invoke($m, '2813 34374'));
+gleich('Shift hoch', 'INC 25', $shift->invoke($m, 100, 125));
+gleich('Shift runter', 'DEC 25', $shift->invoke($m, 125, 100));
+gleich('Shift schon da', null, $shift->invoke($m, 5, 5));
+gleich('Shift hoch, INC senkt', 'DEC 25', $shift->invoke($m, 100, 125, -1));
+gleich('Shift runter, INC senkt', 'INC 25', $shift->invoke($m, 125, 100, -1));
+gleich('Richtung unbekannt wie INC hebt', 'INC 25', $shift->invoke($m, 100, 125, 0));
+gleich('Name kodieren', '53 61 61 6c', $enc->invoke($m, 'Saal'));
+gleich('Name dekodieren', 'Saal', $dec->invoke($m, '53 61 61 6C'));
+gleich('Kein Hex bleibt, wie es ist', 'Saal 1', $dec->invoke($m, 'Saal 1'));
+
 // ---------------------------------------------------------------- Fazit
 echo PHP_EOL . str_repeat('=', 60) . PHP_EOL;
 printf("%d bestanden, %d gefallen\n", $bestanden, $gefallen);
