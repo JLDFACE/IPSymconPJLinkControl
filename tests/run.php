@@ -529,6 +529,86 @@ try {
     stoppeProjektor($p);
 }
 
+// ---------------------------------------------------------------- Aus-Schutz
+/** Spielt Fernbedienung bzw. HDMI-CEC: schickt einen Befehl am Modul vorbei ans Geraet. */
+function amModulVorbei($port, $befehl)
+{
+    $s = fsockopen('127.0.0.1', $port, $en, $es, 2);
+    stream_set_timeout($s, 2);
+    fgets($s, 64);                       // PJLINK 0
+    fwrite($s, $befehl . "\r");
+    $antwort = trim((string)fgets($s, 128));
+    fclose($s);
+    return $antwort;
+}
+
+abschnitt('Aus-Schutz: Einschalten kurz nach Aus (HDMI-CEC) wird verworfen');
+$p = starteProjektor(['power' => '1']);
+try {
+    $m = neuesModul($p['port']);
+    $m->ApplyChanges();
+    $m->Poll();
+    $m->RequestAction('Power', false);
+    $m->Poll();
+    gleich('Ausgeschaltet', 0, $m->GetValue('PowerState'));
+
+    amModulVorbei($p['port'], '%1POWR 1');   // Zuspieler weckt ihn per CEC
+    IPSKernel::$log = [];
+    $m->Poll();
+    gleich('Sollwert bleibt AUS', false, $m->GetValue('__CmdPower'));
+    gleich('Power-Variable bleibt AUS', false, $m->GetValue('Power'));
+    gleich('Geraet wieder ausgeschaltet', '%1POWR=0', amModulVorbei($p['port'], '%1POWR ?'));
+    pruefe('Verwerfen steht im Log', count(preg_grep('/Aus-Schutz/', IPSKernel::$log)) > 0);
+
+    $m->RequestAction('Power', true);         // gewolltes Ein hebt den Schutz auf
+    $m->Poll();
+    gleich('Ein ueber Symcon geht trotzdem', 1, $m->GetValue('PowerState'));
+} finally {
+    stoppeProjektor($p);
+}
+
+abschnitt('Aus-Schutz aus: externes Einschalten wird uebernommen');
+$p = starteProjektor(['power' => '1']);
+try {
+    $m = neuesModul($p['port'], ['OffGuardSeconds' => 0]);
+    $m->ApplyChanges();
+    $m->Poll();
+    $m->RequestAction('Power', false);
+    $m->Poll();
+    amModulVorbei($p['port'], '%1POWR 1');
+    $m->Poll();
+    gleich('Sollwert auf EIN uebernommen', true, $m->GetValue('__CmdPower'));
+    gleich('Geraet bleibt an', '%1POWR=1', amModulVorbei($p['port'], '%1POWR ?'));
+} finally {
+    stoppeProjektor($p);
+}
+
+// ---------------------------------------------------------------- Netz weg nach Cool-down
+abschnitt('Cool-down, dann Netzwerk weg (Epson Standby „Eco“)');
+$m = neuesModul(14998); // niemand hoert hier zu
+$m->ApplyChanges();
+$m->SetValue('Online', true);
+$m->SetValue('PowerState', 2);
+$m->SetValue('__LastPwr', 2);
+$m->SetValue('__CmdPower', false);
+$m->SetValue('Busy', true);
+$m->SetValue('LastOKTimestamp', time() - 5);
+$m->Poll();
+gleich('Kurz nach letzter Antwort: noch Aussetzer', true, $m->GetValue('Online'));
+gleich('Kurz nach letzter Antwort: noch Cool-down', 2, $m->GetValue('PowerState'));
+
+$m->SetValue('LastOKTimestamp', time() - 120);
+$m->Poll();
+gleich('Danach offline', false, $m->GetValue('Online'));
+gleich('Als AUS gewertet', 0, $m->GetValue('PowerState'));
+gleich('Nicht mehr Busy', false, $m->GetValue('Busy'));
+
+IPSKernel::$log = [];
+$m->SetValue('PowerState', 2);              // auch ein stehengebliebener Cool-down ...
+$m->RequestAction('Power', true);           // ... darf Befehle nicht sperren, wenn offline
+pruefe('Keine Cool-down-Sperre bei offline', count(preg_grep('/Cool-down ignoriert/', IPSKernel::$log)) === 0,
+    implode(' | ', IPSKernel::$log));
+
 // ---------------------------------------------------------------- Offline
 abschnitt('Geraet nicht erreichbar');
 $m = neuesModul(14999); // niemand hoert hier zu

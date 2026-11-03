@@ -28,6 +28,7 @@
     { "type": "NumberSpinner", "name": "PollOfflineMax", "caption": "Bei Ausfall max. Poll-Abstand (Sek., 0 = aus)", "minimum": 0, "maximum": 3600 },
 
     { "type": "NumberSpinner", "name": "FastAfterChange", "caption": "Nach Statusänderung schnell pollen (Sek.)", "minimum": 0, "maximum": 300 },
+    { "type": "NumberSpinner", "name": "OffGuardSeconds", "caption": "Aus-Schutz: Wiedereinschalten (z. B. HDMI-CEC) nach Aus verwerfen (Sek., 0 = aus)", "minimum": 0, "maximum": 600 },
     { "type": "NumberSpinner", "name": "ErrorLogCooldown", "caption": "Fehler-Log Drosselung (Sek., 0 = aus)", "minimum": 0, "maximum": 3600 },
 
     { "type": "Label", "caption": "Zusatzfunktionen des PJLink-Standards (herstellerunabhängig):" },

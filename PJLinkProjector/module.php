@@ -83,6 +83,12 @@ class PJLinkProjector extends IPSModule
         // Nach Statusänderung noch X Sekunden schnell pollen
         $this->RegisterPropertyInteger('FastAfterChange', 30);
 
+        // Aus-Schutz (Sek., 0 = aus): so lange nach einem Aus-Befehl wird ein Einschalten
+        // am Gerät NICHT als Wunsch übernommen, sondern wieder ausgeschaltet. Zuspieler
+        // wecken den Projektor per HDMI-CEC gern wieder auf, sobald er aus ist
+        // (Olive Münster 03.11.2026: zwei Epson 20 s nach „Aus“ wieder an).
+        $this->RegisterPropertyInteger('OffGuardSeconds', 60);
+
         // Fehlermeldungen drosseln (Sekunden, 0 = keine Drosselung)
         $this->RegisterPropertyInteger('ErrorLogCooldown', 60);
 
@@ -424,9 +430,14 @@ class PJLinkProjector extends IPSModule
 
     private function HandlePowerAction($wantOn)
     {
-        // Cool-down Sperre
+        // Aus-Schutz: Zeitpunkt des Aus-Befehls merken, ein Ein-Befehl hebt ihn auf
+        $this->SetBuffer('OffCmdTs', $wantOn ? '0' : (string)time());
+
+        // Cool-down Sperre - nur solange das Gerät erreichbar ist. Ein Projektor, der
+        // nach dem Cool-down vom Netz geht, meldet sich nie mehr mit einem anderen
+        // Zustand; die Sperre hätte ihn sonst für immer blockiert.
         $pwrState = (int)$this->GetValue('PowerState');
-        if ($pwrState === 2) {
+        if ($pwrState === 2 && (bool)$this->GetValue('Online')) {
             $this->SetValue('Power', (bool)$this->GetValue('__CmdPower'));
             $this->LogMessage('Power-Schalten während Cool-down ignoriert.', KL_WARNING);
             return;
@@ -765,9 +776,19 @@ class PJLinkProjector extends IPSModule
                 //      verpasst und der Projektor sofort wieder ausgeschaltet wurde.)
                 //   - An (1) nur übernehmen, wenn er aus Aus/Warm-up hochkam ($last 0 oder 3);
                 //     ein lingerndes "An" direkt nach eigenem Aus-Befehl darf NICHT reaktivieren.
+                //   - Kurz nach einem eigenen Aus-Befehl (Aus-Schutz) ist ein Einschalten kein
+                //     Wunsch, sondern meist HDMI-CEC des Zuspielers: Sollwert bleibt AUS,
+                //     ApplyLogic schaltet wieder aus, sobald das Gerät es annimmt.
                 if (!(bool)$self->GetValue('__CmdPower')) {
                     $externalOn = ($pwrState === 3)
                         || ($pwrState === 1 && ($last === 0 || $last === 3));
+                    if ($externalOn && $self->OffGuardActive()) {
+                        $externalOn = false;
+                        if ($last !== $pwrState) {
+                            $self->LogMessage('Einschalten ' . (time() - (int)$self->GetBuffer('OffCmdTs'))
+                                . ' s nach Aus-Befehl verworfen (Aus-Schutz, vermutlich HDMI-CEC) – wird wieder ausgeschaltet.', KL_WARNING);
+                        }
+                    }
                     if ($externalOn) {
                         $self->SetValue('__CmdPower', true);
                         $self->SetValue('Power', true);
@@ -915,11 +936,31 @@ class PJLinkProjector extends IPSModule
 
             } catch (Exception $e) {
 
-                if ($self->IsTransientPJLinkError($e->getMessage()) && $self->IsLikelyTransition()) {
+                // Übergang (Warm-up/Cool-down/Umschalten): Aussetzer tolerieren - aber ein
+                // Verbindungsausfall nur begrenzt. Manche Projektoren (Epson im Standby-
+                // Modus „Eco“) schalten nach dem Cool-down das Netzwerk ab; ohne Grenze
+                // stand das Modul danach für immer auf „Cool-down“ und nahm keinen
+                // Befehl mehr an (Olive Münster 03.11.2026, Tisch 2).
+                $weg = time() - (int)$self->GetValue('LastOKTimestamp');
+                $verbindungWeg = $self->IsUndeliveredPJLinkError($e->getMessage());
+                if ($self->IsTransientPJLinkError($e->getMessage()) && $self->IsLikelyTransition()
+                    && (!$verbindungWeg || $weg < self::TRANSITION_GRACE)) {
                     $self->LogMessage('PJLink-Antwort während eines Übergangs ausgeblieben: '
                         . $e->getMessage(), KL_DEBUG);
                     $self->SetPollInterval($self->ReadPropertyInteger('PollFast'));
                     return;
+                }
+
+                // Nach Cool-down bzw. bei gewolltem Aus vom Netz gegangen = aus (Netzwerk-Standby aus)
+                if ($verbindungWeg && ((int)$self->GetValue('PowerState') === 2 || !(bool)$self->GetValue('__CmdPower'))
+                    && (int)$self->GetValue('PowerState') !== 0) {
+                    $self->SetValue('PowerState', 0);
+                    $self->SetValue('__LastPwr', 0);
+                    $self->SetValue('Power', false);
+                    $self->SetValue('__CmdPower', false);
+                    $self->LogMessage('Projektor nach dem Ausschalten nicht mehr erreichbar – als AUS gewertet. '
+                        . 'Er hat vermutlich im Standby das Netzwerk abgeschaltet (Epson: Standby-Modus „Kommunikation an“), '
+                        . 'dann lässt er sich per Netzwerk auch nicht mehr einschalten.', KL_WARNING);
                 }
 
                 $self->SetOnlineError($e->getMessage());
@@ -1318,6 +1359,11 @@ class PJLinkProjector extends IPSModule
             if ((int)$pwrState === 0) {
                 return;
             }
+            // Warm-up: Epson & Co. lehnen POWR 0 hier mit ERR3 ab -> abwarten, bis er an ist
+            if ((int)$pwrState === 3) {
+                $this->SetPollInterval($this->ReadPropertyInteger('PollFast'));
+                return;
+            }
             // Diagnose: macht ein Modul-seitiges Ausschalten im Meldungslog eindeutig sichtbar
             // (unterscheidbar von einem Aus über eine externe Automation/Kopplung).
             $this->LogMessage('ApplyLogic: Soll=Aus – sende POWR 0 (PowerState=' . (int)$pwrState . ').', KL_NOTIFY);
@@ -1585,6 +1631,14 @@ class PJLinkProjector extends IPSModule
     // Läuft gerade ein Übergang (Power ODER Quellenwechsel)? Während eines
     // Übergangs sind ausgebliebene Antworten normal und dürfen nicht als
     // Ausfall im Meldungslog landen.
+    // Aus-Schutz läuft: eigener Aus-Befehl liegt weniger als OffGuardSeconds zurück
+    private function OffGuardActive()
+    {
+        $guard = (int)$this->ReadPropertyInteger('OffGuardSeconds');
+        $ts = (int)$this->GetBuffer('OffCmdTs');
+        return $guard > 0 && $ts > 0 && (time() - $ts) < $guard;
+    }
+
     private function IsLikelyTransition()
     {
         $pwrState = (int)$this->GetValue('PowerState');
@@ -2745,6 +2799,10 @@ class PJLinkProjector extends IPSModule
     // Erste Shift-Fahrt bei unbekannter Richtung: so weit vorfahren und schauen, wohin es
     // geht. 5 Counts sind im Bild nicht zu sehen, liegen aber sicher über dem Leserauschen.
     const LENS_SHIFT_PROBE = 5;
+
+    // So lange (Sek. seit der letzten Antwort) gilt ein Verbindungsausfall während eines
+    // Übergangs als Aussetzer. Danach ist der Projektor weg, auch mitten im Cool-down.
+    const TRANSITION_GRACE = 45;
 
     private function LensProfileName($kind)
     {
